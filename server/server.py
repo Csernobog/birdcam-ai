@@ -110,6 +110,7 @@ class SsdDetector:
         exclude_aspect_min: float = 0.0,
         exclude_area_min: float = 0.0,
         exclude_area_max: float = 1.0,
+        class0_as_bird_min_conf: float = 0.50,
     ):
         self.model_path = model_path
         # Exclusion filters (used to skip common false positives like the feeder)
@@ -122,14 +123,23 @@ class SsdDetector:
         self.interpreter.allocate_tensors()
         self.input_details = self.interpreter.get_input_details()
         self.output_details = self.interpreter.get_output_details()
-
+        self.class0_as_bird_min_conf = float(class0_as_bird_min_conf)   
         in_shape = self.input_details[0]["shape"]
         self.in_h, self.in_w = int(in_shape[1]), int(in_shape[2])
         self.in_index = self.input_details[0]["index"]
 
         # (meta, tensor_index)
         self._out_meta = [(o, o["index"]) for o in self.output_details]
-
+    def _effective_class(self, c_raw: int, score: float, target_class: Optional[int]) -> int:
+        """
+        Promote class 0 to target_class if score >= threshold.
+        If target_class is None, we cannot promote meaningfully, so return raw.
+        """
+        if target_class is None:
+            return c_raw
+        if c_raw == 0 and score >= self.class0_as_bird_min_conf:
+            return int(target_class)
+        return c_raw
     def run_ssd(self, img_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         inp = preprocess_for_uint8_ssd(img_bgr, self.in_h, self.in_w)
         inp = np.expand_dims(inp, axis=0)
@@ -180,100 +190,116 @@ class SsdDetector:
 
         return boxes, classes, scores
 
-    def best_detection_any(
-        self,
-        img_path: str,
-        min_conf: float,
-        use_roi: bool,
-        roi: Optional[Tuple[int, int, int, int]],
-        target_class: Optional[int],
-    ) -> Dict[str, Any]:
-        img = cv2.imread(img_path, cv2.IMREAD_COLOR)
-        if img is None:
-            return {"ok": False, "error": f"cannot_read: {img_path}"}
+def best_detection_any(
+    self,
+    img_path: str,
+    min_conf: float,
+    use_roi: bool,
+    roi: Optional[Tuple[int, int, int, int]],
+    target_class: Optional[int],
+) -> Dict[str, Any]:
+    img = cv2.imread(img_path, cv2.IMREAD_COLOR)
+    if img is None:
+        return {"ok": False, "error": f"cannot_read: {img_path}"}
 
-        full_h, full_w = img.shape[:2]
+    full_h, full_w = img.shape[:2]
 
-        crop = img
-        roi_box = None
-        if use_roi and roi is not None:
-            x1, y1, x2, y2 = roi
-            # clamp ROI to image bounds
-            x1 = int(clamp(x1, 0, full_w - 1))
-            x2 = int(clamp(x2, 1, full_w))
-            y1 = int(clamp(y1, 0, full_h - 1))
-            y2 = int(clamp(y2, 1, full_h))
-            if x2 > x1 and y2 > y1:
-                crop = img[y1:y2, x1:x2].copy()
-                roi_box = (x1, y1, x2, y2)
+    crop = img
+    roi_box = None
+    if use_roi and roi is not None:
+        x1, y1, x2, y2 = roi
+        # clamp ROI to image bounds
+        x1 = int(clamp(x1, 0, full_w - 1))
+        x2 = int(clamp(x2, 1, full_w))
+        y1 = int(clamp(y1, 0, full_h - 1))
+        y2 = int(clamp(y2, 1, full_h))
+        if x2 > x1 and y2 > y1:
+            crop = img[y1:y2, x1:x2].copy()
+            roi_box = (x1, y1, x2, y2)
 
-        boxes, classes, scores = self.run_ssd(crop)
+    boxes, classes, scores = self.run_ssd(crop)
 
-        # Collect all candidates above min_conf (and matching target_class if provided),
-        # map bboxes to FULL image normalized coords if ROI used, then pick the best
-        # candidate that is NOT excluded by feeder/shape filters.
-        candidates: List[Dict[str, Any]] = []
-        n = min(len(scores), len(classes), len(boxes))
-        for i in range(n):
-            s = float(scores[i])
-            if s < min_conf:
-                continue
-            c = int(classes[i])
-            if target_class is not None and c != int(target_class):
-                continue
+    # Collect all candidates above min_conf (and matching target_class if provided),
+    # map bboxes to FULL image normalized coords if ROI used, then pick the best
+    # candidate that is NOT excluded by feeder/shape filters.
+    candidates: List[Dict[str, Any]] = []
+    n = min(len(scores), len(classes), len(boxes))
+    tgt = int(target_class) if target_class is not None else None
 
-            ymin, xmin, ymax, xmax = [float(x) for x in boxes[i]]
+    for i in range(n):
+        s = float(scores[i])
+        if s < min_conf:
+            continue
 
-            # map bbox back to FULL image normalized coords if ROI used
-            if roi_box is not None:
-                x1, y1, x2, y2 = roi_box
-                roi_w = float(x2 - x1)
-                roi_h = float(y2 - y1)
-                ymin_f = (y1 + ymin * roi_h) / float(full_h)
-                ymax_f = (y1 + ymax * roi_h) / float(full_h)
-                xmin_f = (x1 + xmin * roi_w) / float(full_w)
-                xmax_f = (x1 + xmax * roi_w) / float(full_w)
-                ymin, xmin, ymax, xmax = ymin_f, xmin_f, ymax_f, xmax_f
+        c_raw = int(classes[i])
+        c_eff = self._effective_class(c_raw, s, tgt)
 
-            bbox = {"ymin": ymin, "xmin": xmin, "ymax": ymax, "xmax": xmax}
-            candidates.append({"score": s, "class": c, "bbox": bbox})
+        # NOTE: target_class filtering must use effective class (after promotion)
+        if tgt is not None and c_eff != tgt:
+            continue
 
-        candidates.sort(key=lambda d: d["score"], reverse=True)
+        ymin, xmin, ymax, xmax = [float(x) for x in boxes[i]]
 
-        def is_excluded(bbox: Dict[str, float]) -> bool:
-            # A) Shape/area filter: useful to reject the "whole feeder" false positive
-            if self.exclude_aspect_min > 0.0:
-                asp = bbox_aspect_hw(bbox)
-                if asp >= self.exclude_aspect_min:
-                    a = bbox_area(bbox)
-                    if a >= self.exclude_area_min and a <= self.exclude_area_max:
-                        return True
-
-            # B) Exclusion zones (IoU): useful to reject "cap-only" false positives
-            for xb in self.exclude_boxes_norm:
-                if bbox_iou(bbox, xb) >= self.exclude_iou:
-                    return True
-            return False
-
-        best = None
-        skipped = 0
-        for cand in candidates:
-            if is_excluded(cand["bbox"]):
-                skipped += 1
-                continue
-            best = cand
-            break
-
-        out: Dict[str, Any] = {
-            "ok": True,
-            "best": best,
-            "image_shape": [int(full_h), int(full_w), 3],
-            "candidates": int(len(candidates)),
-            "skipped": int(skipped),
-        }
+        # map bbox back to FULL image normalized coords if ROI used
         if roi_box is not None:
-            out["roi"] = {"x1": roi_box[0], "y1": roi_box[1], "x2": roi_box[2], "y2": roi_box[3]}
-        return out
+            x1, y1, x2, y2 = roi_box
+            roi_w = float(x2 - x1)
+            roi_h = float(y2 - y1)
+            ymin_f = (y1 + ymin * roi_h) / float(full_h)
+            ymax_f = (y1 + ymax * roi_h) / float(full_h)
+            xmin_f = (x1 + xmin * roi_w) / float(full_w)
+            xmax_f = (x1 + xmax * roi_w) / float(full_w)
+            ymin, xmin, ymax, xmax = ymin_f, xmin_f, ymax_f, xmax_f
+
+        bbox = {"ymin": ymin, "xmin": xmin, "ymax": ymax, "xmax": xmax}
+        promoted = (c_raw == 0 and tgt is not None and c_eff == tgt)
+
+        candidates.append(
+            {
+                "score": s,
+                "class": c_eff,  # effective class (after promotion)
+                "bbox": bbox,
+                "raw_class": c_raw,
+                "promoted_from_class0": promoted,
+            }
+        )
+
+    candidates.sort(key=lambda d: d["score"], reverse=True)
+
+    def is_excluded(bbox: Dict[str, float]) -> bool:
+        # A) Shape/area filter: useful to reject the "whole feeder" false positive
+        if self.exclude_aspect_min > 0.0:
+            asp = bbox_aspect_hw(bbox)
+            if asp >= self.exclude_aspect_min:
+                a = bbox_area(bbox)
+                if a >= self.exclude_area_min and a <= self.exclude_area_max:
+                    return True
+
+        # B) Exclusion zones (IoU): useful to reject "cap-only" false positives
+        for xb in self.exclude_boxes_norm:
+            if bbox_iou(bbox, xb) >= self.exclude_iou:
+                return True
+        return False
+
+    best = None
+    skipped = 0
+    for cand in candidates:
+        if is_excluded(cand["bbox"]):
+            skipped += 1
+            continue
+        best = cand
+        break
+
+    out: Dict[str, Any] = {
+        "ok": True,
+        "best": best,
+        "image_shape": [int(full_h), int(full_w), 3],
+        "candidates": int(len(candidates)),
+        "skipped": int(skipped),
+    }
+    if roi_box is not None:
+        out["roi"] = {"x1": roi_box[0], "y1": roi_box[1], "x2": roi_box[2], "y2": roi_box[3]}
+    return out    
 
 
 def build_run_folder(base: str, date: str, time_: str) -> str:
@@ -407,7 +433,8 @@ def create_app() -> FastAPI:
     exclude_aspect_min = float(os.environ.get("BIRDCAM_EXCLUDE_ASPECT_MIN", "0"))
     exclude_area_min = float(os.environ.get("BIRDCAM_EXCLUDE_AREA_MIN", "0"))
     exclude_area_max = float(os.environ.get("BIRDCAM_EXCLUDE_AREA_MAX", "1"))
-
+    # class0 promotion: treat class 0 as "bird" if score >= threshold
+    class0_as_bird_min_conf = float(os.environ.get("BIRDCAM_CLASS0_AS_BIRD_MIN_CONF", "0.50"))
     det = SsdDetector(
         model_path=model,
         num_threads=threads,
@@ -416,6 +443,7 @@ def create_app() -> FastAPI:
         exclude_aspect_min=exclude_aspect_min,
         exclude_area_min=exclude_area_min,
         exclude_area_max=exclude_area_max,
+        class0_as_bird_min_conf=class0_as_bird_min_conf,
     )
     app = FastAPI(title="birdcam_local_ai", version="1.0.3")
 
@@ -451,6 +479,7 @@ def create_app() -> FastAPI:
                 "aspect_min": exclude_aspect_min,
                 "area_min": exclude_area_min,
                 "area_max": exclude_area_max,
+            "class0_as_bird_min_conf": class0_as_bird_min_conf,
             },
         }
 
