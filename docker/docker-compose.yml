@@ -1,0 +1,16 @@
+version: "3.9"
+
+services:
+  birdcam-ai:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: birdcam-ai
+    ports:
+      - "8000:8000"
+    volumes:
+      - /nas/birdcam:/nas/birdcam
+      - /nas/models:/app/models
+    environment:
+      - BIRDCAM_MODEL=/app/models/detect.tflite
+    restart: unless-stopped

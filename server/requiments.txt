@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+tflite-runtime
+opencv-python-headless
+numpy
