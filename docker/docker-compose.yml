@@ -9,8 +9,30 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - /nas/birdcam:/nas/birdcam
-      - /nas/models:/app/models
+      - /mnt/nas_ha/birdcam:/mnt/nas_ha/birdcam
     environment:
-      - BIRDCAM_MODEL=/app/models/detect.tflite
+       BIRDCAM_BASE: /mnt/nas_ha/birdcam
+       BIRDCAM_MODEL: /mnt/nas_ha/birdcam/models/detect.tflite
+       BIRDCAM_MIN_CONF: 0.35
+       BIRDCAM_THREADS: 4
+       BIRDCAM_ENABLE_SPATIAL_FILTER: 0
+       BIRDCAM_REJECT_YCENTER_GT: 0.90
+       BIRDCAM_USE_ROI: 0
+       BIRDCAM_ORIENTATION: auto
+       BIRDCAM_ROI_ORIENTATION: auto
+       BIRDCAM_ROI_LANDSCAPE: "80,0,520,260"
+       BIRDCAM_ROI_PORTRAIT: "80,0,520,260"
+       BIRDCAM_EXCLUDE_ASPECT_MIN: 2.0
+       BIRDCAM_EXCLUDE_AREA_MIN: 0.05
+       BIRDCAM_EXCLUDE_AREA_MAX: 0.25
+       BIRDCAM_EXCLUDE_IOU: 0.20
+       BIRDCAM_EXCLUDE_BOXES_NORM: "0,0,0.4049,0.1610;0.2860,0.2331,0.3250,0.3749;0.1666,0.4638,0.4188,0.5648;0.2390,0.5456,0.3671,0.9216;   0.8970,0.4230,0.9999,0.5900"
+       BIRDCAM_BIG_BBOX_PENALTY: 1
+       BIRDCAM_BIG_BBOX_AREA: 0.12
+       BIRDCAM_BIG_BBOX_LOW_SCORE: 0.30
+       BIRDCAM_NEAR_BEST_SMALL_WINS: 1
+       BIRDCAM_NEAR_BEST_SMALL_AREA: 0.10
+       BIRDCAM_NEAR_BEST_DELTA_SCORE: 0.12
+       BIRDCAM_NEAR_BEST_TRIGGER_AREA: 0.15
+
     restart: unless-stopped
