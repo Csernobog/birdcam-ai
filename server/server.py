@@ -110,6 +110,7 @@ class SsdDetector:
         exclude_aspect_min: float = 0.0,
         exclude_area_min: float = 0.0,
         exclude_area_max: float = 1.0,
+        class0_as_bird_min_conf: float = 0.50,
     ):
         self.model_path = model_path
         # Exclusion filters (used to skip common false positives like the feeder)
@@ -122,14 +123,23 @@ class SsdDetector:
         self.interpreter.allocate_tensors()
         self.input_details = self.interpreter.get_input_details()
         self.output_details = self.interpreter.get_output_details()
-
+        self.class0_as_bird_min_conf = float(class0_as_bird_min_conf)   
         in_shape = self.input_details[0]["shape"]
         self.in_h, self.in_w = int(in_shape[1]), int(in_shape[2])
         self.in_index = self.input_details[0]["index"]
 
         # (meta, tensor_index)
         self._out_meta = [(o, o["index"]) for o in self.output_details]
-
+    def _effective_class(self, c_raw: int, score: float, target_class: Optional[int]) -> int:
+        """
+        Promote class 0 to target_class if score >= threshold.
+        If target_class is None, we cannot promote meaningfully, so return raw.
+        """
+        if target_class is None:
+            return c_raw
+        if c_raw == 0 and score >= self.class0_as_bird_min_conf:
+            return int(target_class)
+        return c_raw
     def run_ssd(self, img_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         inp = preprocess_for_uint8_ssd(img_bgr, self.in_h, self.in_w)
         inp = np.expand_dims(inp, axis=0)
@@ -214,12 +224,18 @@ class SsdDetector:
         # candidate that is NOT excluded by feeder/shape filters.
         candidates: List[Dict[str, Any]] = []
         n = min(len(scores), len(classes), len(boxes))
+        tgt = int(target_class) if target_class is not None else None
+
         for i in range(n):
             s = float(scores[i])
             if s < min_conf:
                 continue
-            c = int(classes[i])
-            if target_class is not None and c != int(target_class):
+
+            c_raw = int(classes[i])
+            c_eff = self._effective_class(c_raw, s, tgt)
+
+            # NOTE: target_class filtering must use effective class (after promotion)
+            if tgt is not None and c_eff != tgt:
                 continue
 
             ymin, xmin, ymax, xmax = [float(x) for x in boxes[i]]
@@ -236,7 +252,17 @@ class SsdDetector:
                 ymin, xmin, ymax, xmax = ymin_f, xmin_f, ymax_f, xmax_f
 
             bbox = {"ymin": ymin, "xmin": xmin, "ymax": ymax, "xmax": xmax}
-            candidates.append({"score": s, "class": c, "bbox": bbox})
+            promoted = (c_raw == 0 and tgt is not None and c_eff == tgt)
+
+            candidates.append(
+                {
+                    "score": s,
+                    "class": c_eff,  # effective class (after promotion)
+                    "bbox": bbox,
+                    "raw_class": c_raw,
+                    "promoted_from_class0": promoted,
+                }
+            )
 
         candidates.sort(key=lambda d: d["score"], reverse=True)
 
@@ -255,14 +281,16 @@ class SsdDetector:
                     return True
             return False
 
-        best = None
+        kept: List[Dict[str, Any]] = []
         skipped = 0
+                
         for cand in candidates:
             if is_excluded(cand["bbox"]):
                 skipped += 1
                 continue
-            best = cand
-            break
+            kept.append(cand)
+
+        best = kept[0] if kept else None
 
         out: Dict[str, Any] = {
             "ok": True,
@@ -270,10 +298,11 @@ class SsdDetector:
             "image_shape": [int(full_h), int(full_w), 3],
             "candidates": int(len(candidates)),
             "skipped": int(skipped),
+            "kept": kept[:10],
         }
         if roi_box is not None:
             out["roi"] = {"x1": roi_box[0], "y1": roi_box[1], "x2": roi_box[2], "y2": roi_box[3]}
-        return out
+        return out    
 
 
 def build_run_folder(base: str, date: str, time_: str) -> str:
@@ -310,7 +339,11 @@ def classify_folder(
     best_frame = None
     best_bbox = None
     best_class = None
-
+    
+    def spatial_ok(bbox: Dict[str, float]) -> bool:
+        y_center = (bbox["ymin"] + bbox["ymax"]) / 2.0
+        return y_center <= reject_yc
+    
     for idx, p in enumerate(cams, start=1):
         r = det.best_detection_any(p, min_conf=min_conf, use_roi=use_roi, roi=roi, target_class=target_class)
         frame: Dict[str, Any] = {"frame": idx, "path": p, "ok": r.get("ok", False)}
@@ -325,12 +358,27 @@ def classify_folder(
 
         best = r.get("best")
 
-        if best and enable_spatial:
-            b = best["bbox"]
-            y_center = (b["ymin"] + b["ymax"]) / 2.0
-            if y_center > reject_yc:
-                frame["rejected"] = {"reason": "y_center_gt", "y_center": y_center, "thr": reject_yc}
+        if enable_spatial:
+            kept = r.get("kept") or []
+
+            best2 = None
+            for cand in kept:
+                if spatial_ok(cand["bbox"]):
+                    best2 = cand
+                    break
+
+            if best2 is None:
+                if best is not None:
+                    b = best["bbox"]
+                    y_center = (b["ymin"] + b["ymax"]) / 2.0
+                    frame["rejected"] = {"reason": "y_center_gt_all", "y_center": y_center, "thr": reject_yc}
                 best = None
+            else:
+                if best is not None and best2 is not best:
+                    b = best["bbox"]
+                    y_center = (b["ymin"] + b["ymax"]) / 2.0
+                    frame["rejected"] = {"reason": "y_center_gt", "y_center": y_center, "thr": reject_yc, "fallback": True}
+                best = best2
 
         if best:
             frame["det"] = best
@@ -407,7 +455,8 @@ def create_app() -> FastAPI:
     exclude_aspect_min = float(os.environ.get("BIRDCAM_EXCLUDE_ASPECT_MIN", "0"))
     exclude_area_min = float(os.environ.get("BIRDCAM_EXCLUDE_AREA_MIN", "0"))
     exclude_area_max = float(os.environ.get("BIRDCAM_EXCLUDE_AREA_MAX", "1"))
-
+    # class0 promotion: treat class 0 as "bird" if score >= threshold
+    class0_as_bird_min_conf = float(os.environ.get("BIRDCAM_CLASS0_AS_BIRD_MIN_CONF", "0.50"))
     det = SsdDetector(
         model_path=model,
         num_threads=threads,
@@ -416,6 +465,7 @@ def create_app() -> FastAPI:
         exclude_aspect_min=exclude_aspect_min,
         exclude_area_min=exclude_area_min,
         exclude_area_max=exclude_area_max,
+        class0_as_bird_min_conf=class0_as_bird_min_conf,
     )
     app = FastAPI(title="birdcam_local_ai", version="1.0.3")
 
@@ -451,6 +501,7 @@ def create_app() -> FastAPI:
                 "aspect_min": exclude_aspect_min,
                 "area_min": exclude_area_min,
                 "area_max": exclude_area_max,
+            "class0_as_bird_min_conf": class0_as_bird_min_conf,
             },
         }
 
