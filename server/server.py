@@ -281,14 +281,16 @@ class SsdDetector:
                     return True
             return False
 
-        best = None
+        kept: List[Dict[str, Any]] = []
         skipped = 0
+                
         for cand in candidates:
             if is_excluded(cand["bbox"]):
                 skipped += 1
                 continue
-            best = cand
-            break
+            kept.append(cand)
+
+        best = kept[0] if kept else None
 
         out: Dict[str, Any] = {
             "ok": True,
@@ -296,6 +298,7 @@ class SsdDetector:
             "image_shape": [int(full_h), int(full_w), 3],
             "candidates": int(len(candidates)),
             "skipped": int(skipped),
+            "kept": kept[:10],
         }
         if roi_box is not None:
             out["roi"] = {"x1": roi_box[0], "y1": roi_box[1], "x2": roi_box[2], "y2": roi_box[3]}
@@ -336,7 +339,11 @@ def classify_folder(
     best_frame = None
     best_bbox = None
     best_class = None
-
+    
+    def spatial_ok(bbox: Dict[str, float]) -> bool:
+        y_center = (bbox["ymin"] + bbox["ymax"]) / 2.0
+        return y_center <= reject_yc
+    
     for idx, p in enumerate(cams, start=1):
         r = det.best_detection_any(p, min_conf=min_conf, use_roi=use_roi, roi=roi, target_class=target_class)
         frame: Dict[str, Any] = {"frame": idx, "path": p, "ok": r.get("ok", False)}
@@ -351,12 +358,27 @@ def classify_folder(
 
         best = r.get("best")
 
-        if best and enable_spatial:
-            b = best["bbox"]
-            y_center = (b["ymin"] + b["ymax"]) / 2.0
-            if y_center > reject_yc:
-                frame["rejected"] = {"reason": "y_center_gt", "y_center": y_center, "thr": reject_yc}
+        if enable_spatial:
+            kept = r.get("kept") or []
+
+            best2 = None
+            for cand in kept:
+                if spatial_ok(cand["bbox"]):
+                    best2 = cand
+                    break
+
+            if best2 is None:
+                if best is not None:
+                    b = best["bbox"]
+                    y_center = (b["ymin"] + b["ymax"]) / 2.0
+                    frame["rejected"] = {"reason": "y_center_gt_all", "y_center": y_center, "thr": reject_yc}
                 best = None
+            else:
+                if best is not None and best2 is not best:
+                    b = best["bbox"]
+                    y_center = (b["ymin"] + b["ymax"]) / 2.0
+                    frame["rejected"] = {"reason": "y_center_gt", "y_center": y_center, "thr": reject_yc, "fallback": True}
+                best = best2
 
         if best:
             frame["det"] = best
