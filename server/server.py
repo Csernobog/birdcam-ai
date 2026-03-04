@@ -122,6 +122,7 @@ class SsdDetector:
         exclude_area_ratio_big: float = 1.5,
         exclude_area_ratio_small: float = 0.5,
         exclude_coverage_det_high: float = 0.75,
+        big_box_reject: float = 0.75,
     ):
         self.model_path = model_path
         # Exclusion filters (used to skip common false positives like the feeder)
@@ -142,6 +143,7 @@ class SsdDetector:
         self.exclude_area_ratio_big = float(exclude_area_ratio_big)
         self.exclude_area_ratio_small = float(exclude_area_ratio_small)
         self.exclude_coverage_det_high = float(exclude_coverage_det_high)
+        self.big_box_reject = float(big_box_reject)
 
         # (meta, tensor_index)
         self._out_meta = [(o, o["index"]) for o in self.output_details]
@@ -366,27 +368,51 @@ class SsdDetector:
         excluded_samples: List[Dict[str, Any]] = []
 
         for cand in candidates:
+            bbox = cand.get("bbox") or {}
+            area_det = bbox_area(bbox)
+
+            # 0) Global big-box reject (skip everything else)
+            if area_det >= self.big_box_reject:
+                skipped += 1
+                # opcionális debug minták
+                if len(excluded_samples) < 5:
+                    excluded_samples.append(
+                        {
+                            "score": cand.get("score"),
+                            "class": cand.get("class"),
+                            "raw_class": cand.get("raw_class"),
+                            "bbox": bbox,
+                            "exclude": {
+                                "reason": "global_big_box",
+                                "area_det": area_det,
+                                "thr": self.big_box_reject,
+                            },
+                        }
+                    )
+                continue
+
+            # 1) Size-aware exclude logic
             excluded, dbg = is_excluded(cand)
             if excluded:
                 skipped += 1
-                # opcionális: tegyünk el pár mintát debughoz
                 if dbg and len(excluded_samples) < 5:
                     excluded_samples.append(
                         {
                             "score": cand.get("score"),
                             "class": cand.get("class"),
                             "raw_class": cand.get("raw_class"),
-                            "bbox": cand.get("bbox"),
+                            "bbox": bbox,
                             "exclude": dbg,
                         }
                     )
                 continue
 
-            # opcionális: a kept top10-hez is betehetjük a debugot (ha akarod)
+            # 2) kept list: tedd rá a debugot ha van
             if dbg:
                 cand["exclude_eval"] = dbg
 
             kept.append(cand)
+        
 
         best = kept[0] if kept else None
 
@@ -560,6 +586,7 @@ def create_app() -> FastAPI:
     exclude_coverage_det_high = float(os.environ.get("BIRDCAM_EXCLUDE_COVERAGE_DET_HIGH", "0.75"))
     # class0 promotion: treat class 0 as "bird" if score >= threshold
     class0_as_bird_min_conf = float(os.environ.get("BIRDCAM_CLASS0_AS_BIRD_MIN_CONF", "0.50"))
+    big_box_reject = float(os.environ.get("BIRDCAM_BIG_BOX_REJECT", "0.75"))
     det = SsdDetector(
         model_path=model,
         num_threads=threads,
@@ -572,6 +599,7 @@ def create_app() -> FastAPI:
         exclude_area_ratio_big=exclude_area_ratio_big,
         exclude_area_ratio_small=exclude_area_ratio_small,
         exclude_coverage_det_high=exclude_coverage_det_high,
+        big_box_reject=big_box_reject,
     )
     app = FastAPI(title="birdcam_local_ai", version="1.0.3")
 
@@ -611,6 +639,7 @@ def create_app() -> FastAPI:
                 "area_ratio_small": exclude_area_ratio_small,
                 "coverage_det_high": exclude_coverage_det_high,
             "class0_as_bird_min_conf": class0_as_bird_min_conf,
+            "big_box_reject": big_box_reject,
             },
         }
 
