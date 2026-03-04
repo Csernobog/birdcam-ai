@@ -663,6 +663,7 @@ def create_app() -> FastAPI:
                 "area_max": exclude_area_max,
                 "area_ratio_big": exclude_area_ratio_big,
                 "area_ratio_small": exclude_area_ratio_small,
+                "coverage_max_for_big_ignore": exclude_coverage_max_for_big_ignore,
                 "coverage_det_high": exclude_coverage_det_high,
             "class0_as_bird_min_conf": class0_as_bird_min_conf,
             "big_box_reject": big_box_reject,
