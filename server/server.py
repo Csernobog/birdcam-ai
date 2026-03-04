@@ -123,6 +123,7 @@ class SsdDetector:
         exclude_area_ratio_small: float = 0.5,
         exclude_coverage_det_high: float = 0.55,
         exclude_coverage_max_for_big_ignore: float = 0.25,
+        exclude_big_ignore_min_area: float = 0.30,
         big_box_reject: float = 0.75,
     ):  
         self.model_path = model_path
@@ -146,6 +147,7 @@ class SsdDetector:
         self.exclude_coverage_det_high = float(exclude_coverage_det_high)
         self.exclude_coverage_max_for_big_ignore = float(exclude_coverage_max_for_big_ignore)
         self.big_box_reject = float(big_box_reject)
+        self.exclude_big_ignore_min_area = float(exclude_big_ignore_min_area)
 
         # (meta, tensor_index)
         self._out_meta = [(o, o["index"]) for o in self.output_details]
@@ -359,8 +361,8 @@ class SsdDetector:
 
             # BIG DETECT (bird covering feeder) -> ignore zone only if coverage small
             if area_ratio >= self.exclude_area_ratio_big:
-
-                if best_cov <= self.exclude_coverage_max_for_big_ignore:
+                # only allow big-ignore when detection is also "big enough" on the whole frame
+                if a_det >= self.exclude_big_ignore_min_area and best_cov <= self.exclude_coverage_max_for_big_ignore:
                     dbg["reason"] = "zone_ignored_big_detect"
                     return False, dbg
 
@@ -608,6 +610,7 @@ def create_app() -> FastAPI:
     exclude_area_ratio_small = float(os.environ.get("BIRDCAM_EXCLUDE_AREA_RATIO_SMALL", "0.5"))
     exclude_coverage_det_high = float(os.environ.get("BIRDCAM_EXCLUDE_COVERAGE_DET_HIGH", "0.55"))
     exclude_coverage_max_for_big_ignore = float(os.environ.get("BIRDCAM_EXCLUDE_COVERAGE_MAX_FOR_BIG_IGNORE", "0.25"))
+    exclude_big_ignore_min_area = float(os.environ.get("BIRDCAM_EXCLUDE_BIG_IGNORE_MIN_AREA", "0.30"))
     big_box_reject = float(os.environ.get("BIRDCAM_BIG_BOX_REJECT", "0.75"))
     # class0 promotion: treat class 0 as "bird" if score >= threshold
     class0_as_bird_min_conf = float(os.environ.get("BIRDCAM_CLASS0_AS_BIRD_MIN_CONF", "0.50"))
@@ -625,6 +628,7 @@ def create_app() -> FastAPI:
         exclude_area_ratio_small=exclude_area_ratio_small,
         exclude_coverage_det_high=exclude_coverage_det_high,
         exclude_coverage_max_for_big_ignore=exclude_coverage_max_for_big_ignore,
+        exclude_big_ignore_min_area=exclude_big_ignore_min_area,
         big_box_reject=big_box_reject,
     )
     app = FastAPI(title="birdcam_local_ai", version="1.0.3")
@@ -665,6 +669,8 @@ def create_app() -> FastAPI:
                 "area_ratio_small": exclude_area_ratio_small,
                 "coverage_max_for_big_ignore": exclude_coverage_max_for_big_ignore,
                 "coverage_det_high": exclude_coverage_det_high,
+                "big_ignore_min_area": exclude_big_ignore_min_area,
+            
             "class0_as_bird_min_conf": class0_as_bird_min_conf,
             "big_box_reject": big_box_reject,
             },
