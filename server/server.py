@@ -74,6 +74,14 @@ def bbox_iou(a: Dict[str, float], b: Dict[str, float]) -> float:
     ua = bbox_area(a) + bbox_area(b) - inter
     return inter / ua if ua > 0 else 0.0
 
+def bbox_intersection_area(a: Dict[str, float], b: Dict[str, float]) -> float:
+    ix1 = max(a["xmin"], b["xmin"])
+    iy1 = max(a["ymin"], b["ymin"])
+    ix2 = min(a["xmax"], b["xmax"])
+    iy2 = min(a["ymax"], b["ymax"])
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    return iw * ih
 
 def parse_exclude_boxes_norm(s: str) -> List[Dict[str, float]]:
     # "xmin,ymin,xmax,ymax; xmin,ymin,xmax,ymax"
@@ -111,6 +119,9 @@ class SsdDetector:
         exclude_area_min: float = 0.0,
         exclude_area_max: float = 1.0,
         class0_as_bird_min_conf: float = 0.50,
+        exclude_area_ratio_big: float = 1.5,
+        exclude_area_ratio_small: float = 0.5,
+        exclude_coverage_det_high: float = 0.75,
     ):
         self.model_path = model_path
         # Exclusion filters (used to skip common false positives like the feeder)
@@ -127,6 +138,10 @@ class SsdDetector:
         in_shape = self.input_details[0]["shape"]
         self.in_h, self.in_w = int(in_shape[1]), int(in_shape[2])
         self.in_index = self.input_details[0]["index"]
+        # New, size-aware exclude logic thresholds
+        self.exclude_area_ratio_big = float(exclude_area_ratio_big)
+        self.exclude_area_ratio_small = float(exclude_area_ratio_small)
+        self.exclude_coverage_det_high = float(exclude_coverage_det_high)
 
         # (meta, tensor_index)
         self._out_meta = [(o, o["index"]) for o in self.output_details]
@@ -266,28 +281,111 @@ class SsdDetector:
 
         candidates.sort(key=lambda d: d["score"], reverse=True)
 
-        def is_excluded(bbox: Dict[str, float]) -> bool:
-            # A) Shape/area filter: useful to reject the "whole feeder" false positive
-            if self.exclude_aspect_min > 0.0:
-                asp = bbox_aspect_hw(bbox)
-                if asp >= self.exclude_aspect_min:
-                    a = bbox_area(bbox)
-                    if a >= self.exclude_area_min and a <= self.exclude_area_max:
-                        return True
+        def is_excluded(cand: Dict[str, Any]) -> Tuple[bool, Optional[Dict[str, Any]]]:
+            """
+            Size-aware exclusion vs exclude_boxes_norm using:
+              area_ratio = A_det / A_excl
+              coverage_det = A_intersect / A_det
+            Decision:
+              - no overlap -> ACCEPT
+              - area_ratio >= BIG -> ACCEPT (ignore zone)
+              - area_ratio <= SMALL -> ACCEPT (esp. birds)
+              - else if coverage_det >= HIGH -> EXCLUDE
+              - else -> ACCEPT
+            """
+            bbox = cand["bbox"]
+            a_det = bbox_area(bbox)
+            if a_det <= 0.0 or not self.exclude_boxes_norm:
+                return False, None  # accept
 
-            # B) Exclusion zones (IoU): useful to reject "cap-only" false positives
-            for xb in self.exclude_boxes_norm:
-                if bbox_iou(bbox, xb) >= self.exclude_iou:
-                    return True
-            return False
+            # Find the exclude box that covers the detection the most (max coverage_det)
+            best_match = None
+            best_cov = 0.0
+            best_inter = 0.0
+            best_a_ex = 0.0
+
+            for idx, xb in enumerate(self.exclude_boxes_norm):
+                inter = bbox_intersection_area(bbox, xb)
+                if inter <= 0.0:
+                    continue
+                cov = inter / a_det  # coverage of DET by EXCL
+                if cov > best_cov:
+                    best_cov = cov
+                    best_inter = inter
+                    best_match = {"idx": idx, "box": xb}
+                    best_a_ex = bbox_area(xb)
+
+            if best_match is None:
+                return False, None  # no overlap -> accept
+
+            # Guard: if exclude box has invalid area, don't exclude
+            if best_a_ex <= 0.0:
+                dbg = {
+                    "reason": "excl_invalid_area",
+                    "coverage_det": best_cov,
+                    "area_det": a_det,
+                    "area_excl": best_a_ex,
+                    "match_idx": best_match["idx"],
+                }
+                return False, dbg
+
+            area_ratio = a_det / best_a_ex
+
+            dbg = {
+                "match_idx": best_match["idx"],
+                "coverage_det": best_cov,
+                "area_ratio": area_ratio,
+                "area_det": a_det,
+                "area_excl": best_a_ex,
+            }
+
+            # A) Big detection: ignore zone (close bird covering feeder)
+            if area_ratio >= self.exclude_area_ratio_big:
+                dbg["reason"] = "zone_ignored_big_detect"
+                return False, dbg
+
+            # B) Small detection inside a larger exclude zone: allow (hanging bird)
+            if area_ratio <= self.exclude_area_ratio_small:
+                if cand.get("class") == (tgt if tgt is not None else cand.get("class")):
+                    dbg["reason"] = "small_detect_allow_bird"
+                else:
+                    dbg["reason"] = "small_detect_allow"
+                return False, dbg
+
+            # C) Similar size: exclude only if detection is mostly inside exclude zone
+            if best_cov >= self.exclude_coverage_det_high:
+                dbg["reason"] = "similar_size_high_coverage"
+                return True, dbg
+
+            dbg["reason"] = "touching_zone_but_not_covering"
+            return False, dbg
 
         kept: List[Dict[str, Any]] = []
         skipped = 0
                 
+        excluded_samples: List[Dict[str, Any]] = []
+
         for cand in candidates:
-            if is_excluded(cand["bbox"]):
+            excluded, dbg = is_excluded(cand)
+            if excluded:
                 skipped += 1
+                # opcionális: tegyünk el pár mintát debughoz
+                if dbg and len(excluded_samples) < 5:
+                    excluded_samples.append(
+                        {
+                            "score": cand.get("score"),
+                            "class": cand.get("class"),
+                            "raw_class": cand.get("raw_class"),
+                            "bbox": cand.get("bbox"),
+                            "exclude": dbg,
+                        }
+                    )
                 continue
+
+            # opcionális: a kept top10-hez is betehetjük a debugot (ha akarod)
+            if dbg:
+                cand["exclude_eval"] = dbg
+
             kept.append(cand)
 
         best = kept[0] if kept else None
@@ -299,6 +397,7 @@ class SsdDetector:
             "candidates": int(len(candidates)),
             "skipped": int(skipped),
             "kept": kept[:10],
+            "excluded_samples": excluded_samples,
         }
         if roi_box is not None:
             out["roi"] = {"x1": roi_box[0], "y1": roi_box[1], "x2": roi_box[2], "y2": roi_box[3]}
@@ -455,6 +554,10 @@ def create_app() -> FastAPI:
     exclude_aspect_min = float(os.environ.get("BIRDCAM_EXCLUDE_ASPECT_MIN", "0"))
     exclude_area_min = float(os.environ.get("BIRDCAM_EXCLUDE_AREA_MIN", "0"))
     exclude_area_max = float(os.environ.get("BIRDCAM_EXCLUDE_AREA_MAX", "1"))
+    # new size-aware exclude logic thresholds
+    exclude_area_ratio_big = float(os.environ.get("BIRDCAM_EXCLUDE_AREA_RATIO_BIG", "1.5"))
+    exclude_area_ratio_small = float(os.environ.get("BIRDCAM_EXCLUDE_AREA_RATIO_SMALL", "0.5"))
+    exclude_coverage_det_high = float(os.environ.get("BIRDCAM_EXCLUDE_COVERAGE_DET_HIGH", "0.75"))
     # class0 promotion: treat class 0 as "bird" if score >= threshold
     class0_as_bird_min_conf = float(os.environ.get("BIRDCAM_CLASS0_AS_BIRD_MIN_CONF", "0.50"))
     det = SsdDetector(
@@ -466,6 +569,9 @@ def create_app() -> FastAPI:
         exclude_area_min=exclude_area_min,
         exclude_area_max=exclude_area_max,
         class0_as_bird_min_conf=class0_as_bird_min_conf,
+        exclude_area_ratio_big=exclude_area_ratio_big,
+        exclude_area_ratio_small=exclude_area_ratio_small,
+        exclude_coverage_det_high=exclude_coverage_det_high,
     )
     app = FastAPI(title="birdcam_local_ai", version="1.0.3")
 
@@ -501,6 +607,9 @@ def create_app() -> FastAPI:
                 "aspect_min": exclude_aspect_min,
                 "area_min": exclude_area_min,
                 "area_max": exclude_area_max,
+                "area_ratio_big": exclude_area_ratio_big,
+                "area_ratio_small": exclude_area_ratio_small,
+                "coverage_det_high": exclude_coverage_det_high,
             "class0_as_bird_min_conf": class0_as_bird_min_conf,
             },
         }
