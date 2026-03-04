@@ -121,9 +121,10 @@ class SsdDetector:
         class0_as_bird_min_conf: float = 0.50,
         exclude_area_ratio_big: float = 1.5,
         exclude_area_ratio_small: float = 0.5,
-        exclude_coverage_det_high: float = 0.75,
+        exclude_coverage_det_high: float = 0.55,
+        exclude_coverage_max_for_big_ignore: float = 0.25,
         big_box_reject: float = 0.75,
-    ):
+    ):  
         self.model_path = model_path
         # Exclusion filters (used to skip common false positives like the feeder)
         self.exclude_boxes_norm = exclude_boxes_norm or []
@@ -143,6 +144,7 @@ class SsdDetector:
         self.exclude_area_ratio_big = float(exclude_area_ratio_big)
         self.exclude_area_ratio_small = float(exclude_area_ratio_small)
         self.exclude_coverage_det_high = float(exclude_coverage_det_high)
+        self.exclude_coverage_max_for_big_ignore = float(exclude_coverage_max_for_big_ignore)
         self.big_box_reject = float(big_box_reject)
 
         # (meta, tensor_index)
@@ -286,21 +288,34 @@ class SsdDetector:
         def is_excluded(cand: Dict[str, Any]) -> Tuple[bool, Optional[Dict[str, Any]]]:
             """
             Size-aware exclusion vs exclude_boxes_norm using:
-              area_ratio = A_det / A_excl
-              coverage_det = A_intersect / A_det
+            area_ratio = A_det / A_excl
+            coverage_det = A_intersect / A_det
+
             Decision:
-              - no overlap -> ACCEPT
-              - area_ratio >= BIG -> ACCEPT (ignore zone)
-              - area_ratio <= SMALL -> ACCEPT (esp. birds)
-              - else if coverage_det >= HIGH -> EXCLUDE
-              - else -> ACCEPT
+            - no overlap -> ACCEPT
+            - big detect -> ignore zone only if coverage is small
+            - small detect -> ACCEPT (birds hanging on feeder)
+            - else if coverage high -> EXCLUDE
             """
+
             bbox = cand["bbox"]
             a_det = bbox_area(bbox)
-            if a_det <= 0.0 or not self.exclude_boxes_norm:
-                return False, None  # accept
 
-            # Find the exclude box that covers the detection the most (max coverage_det)
+            if a_det <= 0.0:
+                return False, None
+
+            # HARD BIG BOX REJECT (global hallucination guard)
+            if self.big_box_reject > 0.0 and a_det >= self.big_box_reject:
+                dbg = {
+                    "reason": "big_box_reject",
+                    "area_det": a_det,
+                    "thr": self.big_box_reject,
+                }
+                return True, dbg
+
+            if not self.exclude_boxes_norm:
+                return False, None
+
             best_match = None
             best_cov = 0.0
             best_inter = 0.0
@@ -310,7 +325,9 @@ class SsdDetector:
                 inter = bbox_intersection_area(bbox, xb)
                 if inter <= 0.0:
                     continue
-                cov = inter / a_det  # coverage of DET by EXCL
+
+                cov = inter / a_det
+
                 if cov > best_cov:
                     best_cov = cov
                     best_inter = inter
@@ -318,9 +335,8 @@ class SsdDetector:
                     best_a_ex = bbox_area(xb)
 
             if best_match is None:
-                return False, None  # no overlap -> accept
+                return False, None
 
-            # Guard: if exclude box has invalid area, don't exclude
             if best_a_ex <= 0.0:
                 dbg = {
                     "reason": "excl_invalid_area",
@@ -341,20 +357,27 @@ class SsdDetector:
                 "area_excl": best_a_ex,
             }
 
-            # A) Big detection: ignore zone (close bird covering feeder)
+            # BIG DETECT (bird covering feeder) -> ignore zone only if coverage small
             if area_ratio >= self.exclude_area_ratio_big:
-                dbg["reason"] = "zone_ignored_big_detect"
-                return False, dbg
 
-            # B) Small detection inside a larger exclude zone: allow (hanging bird)
+                if best_cov <= self.exclude_coverage_max_for_big_ignore:
+                    dbg["reason"] = "zone_ignored_big_detect"
+                    return False, dbg
+
+                dbg["reason"] = "big_detect_but_high_coverage"
+                # continue evaluation
+
+            # SMALL DETECT (bird inside feeder zone)
             if area_ratio <= self.exclude_area_ratio_small:
-                if cand.get("class") == (tgt if tgt is not None else cand.get("class")):
+
+                if int(cand.get("class", -1)) == 15:
                     dbg["reason"] = "small_detect_allow_bird"
                 else:
                     dbg["reason"] = "small_detect_allow"
+
                 return False, dbg
 
-            # C) Similar size: exclude only if detection is mostly inside exclude zone
+            # SIMILAR SIZE -> exclude if coverage high
             if best_cov >= self.exclude_coverage_det_high:
                 dbg["reason"] = "similar_size_high_coverage"
                 return True, dbg
@@ -583,10 +606,12 @@ def create_app() -> FastAPI:
     # new size-aware exclude logic thresholds
     exclude_area_ratio_big = float(os.environ.get("BIRDCAM_EXCLUDE_AREA_RATIO_BIG", "1.5"))
     exclude_area_ratio_small = float(os.environ.get("BIRDCAM_EXCLUDE_AREA_RATIO_SMALL", "0.5"))
-    exclude_coverage_det_high = float(os.environ.get("BIRDCAM_EXCLUDE_COVERAGE_DET_HIGH", "0.75"))
+    exclude_coverage_det_high = float(os.environ.get("BIRDCAM_EXCLUDE_COVERAGE_DET_HIGH", "0.55"))
+    exclude_coverage_max_for_big_ignore = float(os.environ.get("BIRDCAM_EXCLUDE_COVERAGE_MAX_FOR_BIG_IGNORE", "0.25"))
+    big_box_reject = float(os.environ.get("BIRDCAM_BIG_BOX_REJECT", "0.75"))
     # class0 promotion: treat class 0 as "bird" if score >= threshold
     class0_as_bird_min_conf = float(os.environ.get("BIRDCAM_CLASS0_AS_BIRD_MIN_CONF", "0.50"))
-    big_box_reject = float(os.environ.get("BIRDCAM_BIG_BOX_REJECT", "0.75"))
+    
     det = SsdDetector(
         model_path=model,
         num_threads=threads,
@@ -599,6 +624,7 @@ def create_app() -> FastAPI:
         exclude_area_ratio_big=exclude_area_ratio_big,
         exclude_area_ratio_small=exclude_area_ratio_small,
         exclude_coverage_det_high=exclude_coverage_det_high,
+        exclude_coverage_max_for_big_ignore=exclude_coverage_max_for_big_ignore,
         big_box_reject=big_box_reject,
     )
     app = FastAPI(title="birdcam_local_ai", version="1.0.3")
