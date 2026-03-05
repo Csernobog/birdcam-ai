@@ -132,6 +132,7 @@ class SsdDetector:
         feeder_sig_w_ratio_max: float = 1.40,
         feeder_sig_score_max_reject: float = 0.35,
         feeder_sig_score_min_keep: float = 0.55,
+        feeder_group_boxes_norm: Optional[List[Dict[str, float]]] = None,
     ):  
         self.model_path = model_path
         # Exclusion filters (used to skip common false positives like the feeder)
@@ -163,6 +164,7 @@ class SsdDetector:
         self.feeder_sig_w_ratio_max = float(feeder_sig_w_ratio_max)
         self.feeder_sig_score_max_reject = float(feeder_sig_score_max_reject)
         self.feeder_sig_score_min_keep = float(feeder_sig_score_min_keep)
+        self.feeder_group_boxes_norm = feeder_group_boxes_norm or []
 
         # (meta, tensor_index)
         self._out_meta = [(o, o["index"]) for o in self.output_details]
@@ -384,7 +386,18 @@ class SsdDetector:
                     dbg["feeder_sig"] = {"reason": "keep_high_score", "score": score}
                 else:
                     if raw_c == 15 and score <= self.feeder_sig_score_max_reject:
-                        ex = best_match["box"]
+                        # pick reference box for feeder signature:
+                        # prefer fixed feeder group union (3-4-5) if provided, else fallback to best_match box
+                        if self.feeder_group_boxes_norm:
+                            xs_min = min(b["xmin"] for b in self.feeder_group_boxes_norm)
+                            ys_min = min(b["ymin"] for b in self.feeder_group_boxes_norm)
+                            xs_max = max(b["xmax"] for b in self.feeder_group_boxes_norm)
+                            ys_max = max(b["ymax"] for b in self.feeder_group_boxes_norm)
+                            ex = {"xmin": xs_min, "ymin": ys_min, "xmax": xs_max, "ymax": ys_max}
+                            dbg["feeder_sig_ref"] = {"type": "feeder_group_union", "count": len(self.feeder_group_boxes_norm)}
+                        else:
+                            ex = best_match["box"]
+                            dbg["feeder_sig_ref"] = {"type": "best_match_box", "idx": best_match["idx"]}
 
                         ex_ymin = float(ex["ymin"]); ex_ymax = float(ex["ymax"])
                         ex_xmin = float(ex["xmin"]); ex_xmax = float(ex["xmax"])
@@ -420,7 +433,7 @@ class SsdDetector:
                             dbg["reason"] = "feeder_signature_reject"
                             return True, dbg
             # --- end feeder signature ---
-            
+
             # BIG DETECT (bird covering feeder) -> ignore zone only if coverage small
             if area_ratio >= self.exclude_area_ratio_big:
                 # only allow big-ignore when detection is also "big enough" on the whole frame
@@ -663,6 +676,7 @@ def create_app() -> FastAPI:
 
     # exclusion filters (skip common false positives like the feeder)
     exclude_boxes_norm = parse_exclude_boxes_norm(os.environ.get("BIRDCAM_EXCLUDE_BOXES_NORM", ""))
+    feeder_group_boxes_norm = parse_exclude_boxes_norm(os.environ.get("BIRDCAM_FEEDER_GROUP_BOXES_NORM", ""))
     exclude_iou = float(os.environ.get("BIRDCAM_EXCLUDE_IOU", "0.25"))
     exclude_aspect_min = float(os.environ.get("BIRDCAM_EXCLUDE_ASPECT_MIN", "0"))
     exclude_area_min = float(os.environ.get("BIRDCAM_EXCLUDE_AREA_MIN", "0"))
@@ -707,6 +721,7 @@ def create_app() -> FastAPI:
         feeder_sig_w_ratio_max=feeder_sig_w_ratio_max,
         feeder_sig_score_max_reject=feeder_sig_score_max_reject,
         feeder_sig_score_min_keep=feeder_sig_score_min_keep,
+        feeder_group_boxes_norm=feeder_group_boxes_norm,
     )
     app = FastAPI(title="birdcam_local_ai", version="1.0.3")
 
@@ -755,6 +770,7 @@ def create_app() -> FastAPI:
                     "w_ratio_max": feeder_sig_w_ratio_max,
                     "score_max_reject": feeder_sig_score_max_reject,
                     "score_min_keep": feeder_sig_score_min_keep,
+                    "feeder_group_boxes_norm": feeder_group_boxes_norm,
                 },
             "class0_as_bird_min_conf": class0_as_bird_min_conf,
             "big_box_reject": big_box_reject,
