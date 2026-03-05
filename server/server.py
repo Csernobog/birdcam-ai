@@ -125,6 +125,13 @@ class SsdDetector:
         exclude_coverage_max_for_big_ignore: float = 0.25,
         exclude_big_ignore_min_area: float = 0.30,
         big_box_reject: float = 0.75,
+        feeder_sig_enable: bool = True,
+        feeder_sig_eps_bottom: float = 0.010,
+        feeder_sig_h_ratio_max: float = 1.15,
+        feeder_sig_w_ratio_min: float = 0.70,
+        feeder_sig_w_ratio_max: float = 1.40,
+        feeder_sig_score_max_reject: float = 0.35,
+        feeder_sig_score_min_keep: float = 0.55,
     ):  
         self.model_path = model_path
         # Exclusion filters (used to skip common false positives like the feeder)
@@ -148,6 +155,14 @@ class SsdDetector:
         self.exclude_coverage_max_for_big_ignore = float(exclude_coverage_max_for_big_ignore)
         self.big_box_reject = float(big_box_reject)
         self.exclude_big_ignore_min_area = float(exclude_big_ignore_min_area)
+        # Feeder signature reject (geometry)
+        self.feeder_sig_enable = bool(feeder_sig_enable)
+        self.feeder_sig_eps_bottom = float(feeder_sig_eps_bottom)
+        self.feeder_sig_h_ratio_max = float(feeder_sig_h_ratio_max)
+        self.feeder_sig_w_ratio_min = float(feeder_sig_w_ratio_min)
+        self.feeder_sig_w_ratio_max = float(feeder_sig_w_ratio_max)
+        self.feeder_sig_score_max_reject = float(feeder_sig_score_max_reject)
+        self.feeder_sig_score_min_keep = float(feeder_sig_score_min_keep)
 
         # (meta, tensor_index)
         self._out_meta = [(o, o["index"]) for o in self.output_details]
@@ -358,7 +373,54 @@ class SsdDetector:
                 "area_det": a_det,
                 "area_excl": best_a_ex,
             }
+            # --- Feeder signature reject (geometry-based) ---
+            if self.feeder_sig_enable:
+                # only act for raw_class == 15 (first iteration)
+                raw_c = int(cand.get("raw_class", -1))
+                score = float(cand.get("score", 0.0))
 
+                # High score override: keep (avoid killing real birds)
+                if score >= self.feeder_sig_score_min_keep:
+                    dbg["feeder_sig"] = {"reason": "keep_high_score", "score": score}
+                else:
+                    if raw_c == 15 and score <= self.feeder_sig_score_max_reject:
+                        ex = best_match["box"]
+
+                        ex_ymin = float(ex["ymin"]); ex_ymax = float(ex["ymax"])
+                        ex_xmin = float(ex["xmin"]); ex_xmax = float(ex["xmax"])
+                        ex_h = max(1e-9, ex_ymax - ex_ymin)
+                        ex_w = max(1e-9, ex_xmax - ex_xmin)
+
+                        det_ymin = float(bbox["ymin"]); det_ymax = float(bbox["ymax"])
+                        det_xmin = float(bbox["xmin"]); det_xmax = float(bbox["xmax"])
+                        det_h = max(1e-9, det_ymax - det_ymin)
+                        det_w = max(1e-9, det_xmax - det_xmin)
+
+                        bottom_delta = abs(det_ymax - ex_ymax)
+                        h_ratio = det_h / ex_h
+                        w_ratio = det_w / ex_w
+
+                        sig_ok = (
+                            bottom_delta <= self.feeder_sig_eps_bottom
+                            and h_ratio <= self.feeder_sig_h_ratio_max
+                            and w_ratio >= self.feeder_sig_w_ratio_min
+                            and w_ratio <= self.feeder_sig_w_ratio_max
+                        )
+
+                        dbg["feeder_sig"] = {
+                            "bottom_delta": bottom_delta,
+                            "h_ratio": h_ratio,
+                            "w_ratio": w_ratio,
+                            "sig_ok": sig_ok,
+                            "score": score,
+                            "raw_class": raw_c,
+                        }
+
+                        if sig_ok:
+                            dbg["reason"] = "feeder_signature_reject"
+                            return True, dbg
+            # --- end feeder signature ---
+            
             # BIG DETECT (bird covering feeder) -> ignore zone only if coverage small
             if area_ratio >= self.exclude_area_ratio_big:
                 # only allow big-ignore when detection is also "big enough" on the whole frame
@@ -612,6 +674,14 @@ def create_app() -> FastAPI:
     exclude_coverage_max_for_big_ignore = float(os.environ.get("BIRDCAM_EXCLUDE_COVERAGE_MAX_FOR_BIG_IGNORE", "0.25"))
     exclude_big_ignore_min_area = float(os.environ.get("BIRDCAM_EXCLUDE_BIG_IGNORE_MIN_AREA", "0.30"))
     big_box_reject = float(os.environ.get("BIRDCAM_BIG_BOX_REJECT", "0.75"))
+    # Feeder signature reject (geometry)
+    feeder_sig_enable = os.environ.get("BIRDCAM_FEEDER_SIG_ENABLE", "1") == "1"
+    feeder_sig_eps_bottom = float(os.environ.get("BIRDCAM_FEEDER_SIG_EPS_BOTTOM", "0.010"))
+    feeder_sig_h_ratio_max = float(os.environ.get("BIRDCAM_FEEDER_SIG_H_RATIO_MAX", "1.15"))
+    feeder_sig_w_ratio_min = float(os.environ.get("BIRDCAM_FEEDER_SIG_W_RATIO_MIN", "0.70"))
+    feeder_sig_w_ratio_max = float(os.environ.get("BIRDCAM_FEEDER_SIG_W_RATIO_MAX", "1.40"))
+    feeder_sig_score_max_reject = float(os.environ.get("BIRDCAM_FEEDER_SIG_SCORE_MAX_REJECT", "0.35"))
+    feeder_sig_score_min_keep = float(os.environ.get("BIRDCAM_FEEDER_SIG_SCORE_MIN_KEEP", "0.55"))
     # class0 promotion: treat class 0 as "bird" if score >= threshold
     class0_as_bird_min_conf = float(os.environ.get("BIRDCAM_CLASS0_AS_BIRD_MIN_CONF", "0.50"))
     
@@ -630,6 +700,13 @@ def create_app() -> FastAPI:
         exclude_coverage_max_for_big_ignore=exclude_coverage_max_for_big_ignore,
         exclude_big_ignore_min_area=exclude_big_ignore_min_area,
         big_box_reject=big_box_reject,
+        feeder_sig_enable=feeder_sig_enable,
+        feeder_sig_eps_bottom=feeder_sig_eps_bottom,
+        feeder_sig_h_ratio_max=feeder_sig_h_ratio_max,
+        feeder_sig_w_ratio_min=feeder_sig_w_ratio_min,
+        feeder_sig_w_ratio_max=feeder_sig_w_ratio_max,
+        feeder_sig_score_max_reject=feeder_sig_score_max_reject,
+        feeder_sig_score_min_keep=feeder_sig_score_min_keep,
     )
     app = FastAPI(title="birdcam_local_ai", version="1.0.3")
 
@@ -670,7 +747,15 @@ def create_app() -> FastAPI:
                 "coverage_max_for_big_ignore": exclude_coverage_max_for_big_ignore,
                 "coverage_det_high": exclude_coverage_det_high,
                 "big_ignore_min_area": exclude_big_ignore_min_area,
-            
+                "feeder_sig": {
+                    "enable": feeder_sig_enable,
+                    "eps_bottom": feeder_sig_eps_bottom,
+                    "h_ratio_max": feeder_sig_h_ratio_max,
+                    "w_ratio_min": feeder_sig_w_ratio_min,
+                    "w_ratio_max": feeder_sig_w_ratio_max,
+                    "score_max_reject": feeder_sig_score_max_reject,
+                    "score_min_keep": feeder_sig_score_min_keep,
+                },
             "class0_as_bird_min_conf": class0_as_bird_min_conf,
             "big_box_reject": big_box_reject,
             },
