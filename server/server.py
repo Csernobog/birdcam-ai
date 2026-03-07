@@ -459,7 +459,19 @@ class SsdDetector:
                 ):
                     dbg["reason"] = "reject_feeder_body_fp"
                     return True, dbg
-            # --- end feeder/kupak global false-positive guard ---            
+            # --- end feeder/kupak global false-positive guard --- 
+            # --- generic high-coverage false-positive guard ----------------------------
+            if (
+                dbg.get("reason") == "small_detect_allow_bird"
+                and best_cov >= 0.85
+            ):
+                feeder_sig = dbg.get("feeder_sig") or {}
+                sig_ok = feeder_sig.get("sig_ok", None)
+
+                if sig_ok is False:
+                    dbg["reason"] = "reject_high_coverage_false_fp"
+                    return True, dbg
+            # --- end generic high-coverage false-positive guard ------------------------           
 
             # BIG DETECT (bird covering feeder) -> ignore zone only if coverage small
             if area_ratio >= self.exclude_area_ratio_big:
