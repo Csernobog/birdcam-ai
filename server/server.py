@@ -433,6 +433,33 @@ class SsdDetector:
                             dbg["reason"] = "feeder_signature_reject"
                             return True, dbg
             # --- end feeder signature ---
+            # --- Feeder/kupak global false-positive guard ---
+            # match_idx == 3 környékén tipikus etető/kupak haluk:
+            # - sig_ok = false
+            # - coverage_det kb. 0.59..0.62
+            # - area_det kb. 0.022..0.029
+            # - vagy nagyobb fél-etető eset: area_ratio > 1.0
+            if best_match["idx"] == 3:
+                feeder_sig = dbg.get("feeder_sig") or {}
+                sig_ok = feeder_sig.get("sig_ok", None)
+
+                # kis/közepes kupak / etető halu
+                if (
+                    sig_ok is False
+                    and best_cov >= 0.55
+                    and a_det <= 0.03
+                ):
+                    dbg["reason"] = "reject_feeder_cap_small_fp"
+                    return True, dbg
+
+                # nagyobb fél-etető / etetőtest halu
+                if (
+                    sig_ok is False
+                    and area_ratio > 1.0
+                ):
+                    dbg["reason"] = "reject_feeder_body_fp"
+                    return True, dbg
+            # --- end feeder/kupak global false-positive guard ---            
 
             # BIG DETECT (bird covering feeder) -> ignore zone only if coverage small
             if area_ratio >= self.exclude_area_ratio_big:
