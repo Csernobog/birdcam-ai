@@ -434,46 +434,7 @@ class SsdDetector:
                             return True, dbg
             # --- end feeder signature ---
            
-            # --- generic high-coverage false-positive guard ----------------------------
-            if (
-                dbg.get("reason") == "small_detect_allow_bird"
-                and best_cov >= 0.85
-            ):
-                feeder_sig = dbg.get("feeder_sig") or {}
-                sig_ok = feeder_sig.get("sig_ok", None)
-
-                if sig_ok is False:
-                    dbg["reason"] = "reject_high_coverage_false_fp"
-                    return True, dbg
-            # --- end generic high-coverage false-positive guard ------------------------
-
-            # --- Feeder/kupak global false-positive guard ---
-            # match_idx == 3 környékén tipikus etető/kupak haluk:
-            # - sig_ok = false
-            # - coverage_det kb. 0.59..0.62
-            # - area_det kb. 0.022..0.029
-            # - vagy nagyobb fél-etető eset: area_ratio > 1.0
-            if best_match["idx"] == 3:
-                feeder_sig = dbg.get("feeder_sig") or {}
-                sig_ok = feeder_sig.get("sig_ok", None)
-
-                # kis/közepes kupak / etető halu
-                if (
-                    sig_ok is False
-                    and best_cov >= 0.55
-                    and a_det <= 0.03
-                ):
-                    dbg["reason"] = "reject_feeder_cap_small_fp"
-                    return True, dbg
-
-                # nagyobb fél-etető / etetőtest halu
-                if (
-                    sig_ok is False
-                    and area_ratio > 1.0
-                ):
-                    dbg["reason"] = "reject_feeder_body_fp"
-                    return True, dbg
-            # --- end feeder/kupak global false-positive guard --- 
+      
                        
 
             # BIG DETECT (bird covering feeder) -> ignore zone only if coverage small
@@ -485,17 +446,51 @@ class SsdDetector:
 
                 dbg["reason"] = "big_detect_but_high_coverage"
                 # continue evaluation
-
+            
+            # nagyobb fél-etető / etetőtest halu
+            if (
+                best_match["idx"] == 3
+                and (dbg.get("feeder_sig") or {}).get("sig_ok", None) is False
+                and area_ratio > 1.0
+            ):
+                dbg["reason"] = "reject_feeder_body_fp"
+                return True, dbg
+            
             # SMALL DETECT (bird inside feeder zone)
             if area_ratio <= self.exclude_area_ratio_small:
+                c_eff = int(cand.get("class", -1))
 
-                if int(cand.get("class", -1)) == 15:
+                feeder_sig = dbg.get("feeder_sig") or {}
+                sig_ok = feeder_sig.get("sig_ok", None)
+
+                # generic high-coverage FP guard:
+                # ha a detekt szinte teljesen exclude-ban ül, és a feeder signature szerint nem madár,
+                # akkor ne engedjük át small_detect_allow_bird ágon
+                if (
+                    c_eff == 15
+                    and sig_ok is False
+                    and best_cov >= 0.85
+                ):
+                    dbg["reason"] = "reject_high_coverage_false_fp"
+                    return True, dbg
+
+                # feeder/kupak célzott guard
+                if (
+                    c_eff == 15
+                    and best_match["idx"] == 3
+                    and sig_ok is False
+                    and best_cov >= 0.55
+                    and a_det <= 0.03
+                ):
+                    dbg["reason"] = "reject_feeder_cap_small_fp"
+                    return True, dbg
+
+                if c_eff == 15:
                     dbg["reason"] = "small_detect_allow_bird"
                 else:
                     dbg["reason"] = "small_detect_allow"
 
                 return False, dbg
-
             # SIMILAR SIZE -> exclude if coverage high
             if best_cov >= self.exclude_coverage_det_high:
                 dbg["reason"] = "similar_size_high_coverage"
