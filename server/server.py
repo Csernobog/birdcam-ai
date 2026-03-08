@@ -437,14 +437,12 @@ class SsdDetector:
             # nagyobb etető-test / túlnyúló feeder FP
             if (
                 best_match is not None
+                and best_match["idx"] == 3
                 and area_ratio > 1.0
             ):
-                feeder_sig = dbg.get("feeder_sig") or {}
-                sig_ok = feeder_sig.get("sig_ok", None)
-
-                if sig_ok is False:
-                    dbg["reason"] = "reject_feeder_body_fp"
-                    return True, dbg   
+                            
+                dbg["reason"] = "reject_feeder_body_fp"
+                return True, dbg   
                        
             # BIG DETECT (bird covering feeder) -> ignore zone only if coverage small
             if area_ratio >= self.exclude_area_ratio_big:
