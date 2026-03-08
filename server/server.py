@@ -99,42 +99,6 @@ def parse_exclude_boxes_norm(s: str) -> List[Dict[str, float]]:
         out.append({"xmin": x1, "ymin": y1, "xmax": x2, "ymax": y2})
     return out
 
-def clamp_bbox_norm(b: Dict[str, float]) -> Optional[Dict[str, float]]:
-    xmin = clamp(float(b["xmin"]), 0.0, 1.0)
-    ymin = clamp(float(b["ymin"]), 0.0, 1.0)
-    xmax = clamp(float(b["xmax"]), 0.0, 1.0)
-    ymax = clamp(float(b["ymax"]), 0.0, 1.0)
-
-    if xmax <= xmin or ymax <= ymin:
-        return None
-
-    return {
-        "xmin": xmin,
-        "ymin": ymin,
-        "xmax": xmax,
-        "ymax": ymax,
-    }
-
-
-def shift_exclude_boxes_norm(
-    boxes: List[Dict[str, float]],
-    dx: float,
-    dy: float,
-) -> List[Dict[str, float]]:
-    out: List[Dict[str, float]] = []
-
-    for b in boxes:
-        shifted = {
-            "xmin": float(b["xmin"]) + dx,
-            "ymin": float(b["ymin"]) + dy,
-            "xmax": float(b["xmax"]) + dx,
-            "ymax": float(b["ymax"]) + dy,
-        }
-        clamped = clamp_bbox_norm(shifted)
-        if clamped is not None:
-            out.append(clamped)
-
-    return out
 def preprocess_for_uint8_ssd(img_bgr: np.ndarray, in_h: int, in_w: int) -> np.ndarray:
     """Typical SSD expects uint8 RGB [1,H,W,3]."""
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
@@ -157,8 +121,19 @@ class SsdDetector:
         class0_as_bird_min_conf: float = 0.50,
         exclude_area_ratio_big: float = 1.5,
         exclude_area_ratio_small: float = 0.5,
-        exclude_coverage_det_high: float = 0.75,
-    ):
+        exclude_coverage_det_high: float = 0.55,
+        exclude_coverage_max_for_big_ignore: float = 0.25,
+        exclude_big_ignore_min_area: float = 0.30,
+        big_box_reject: float = 0.75,
+        feeder_sig_enable: bool = True,
+        feeder_sig_eps_bottom: float = 0.010,
+        feeder_sig_h_ratio_max: float = 1.15,
+        feeder_sig_w_ratio_min: float = 0.70,
+        feeder_sig_w_ratio_max: float = 1.40,
+        feeder_sig_score_max_reject: float = 0.35,
+        feeder_sig_score_min_keep: float = 0.55,
+        feeder_group_boxes_norm: Optional[List[Dict[str, float]]] = None,
+    ):  
         self.model_path = model_path
         # Exclusion filters (used to skip common false positives like the feeder)
         self.exclude_boxes_norm = exclude_boxes_norm or []
@@ -178,6 +153,18 @@ class SsdDetector:
         self.exclude_area_ratio_big = float(exclude_area_ratio_big)
         self.exclude_area_ratio_small = float(exclude_area_ratio_small)
         self.exclude_coverage_det_high = float(exclude_coverage_det_high)
+        self.exclude_coverage_max_for_big_ignore = float(exclude_coverage_max_for_big_ignore)
+        self.big_box_reject = float(big_box_reject)
+        self.exclude_big_ignore_min_area = float(exclude_big_ignore_min_area)
+        # Feeder signature reject (geometry)
+        self.feeder_sig_enable = bool(feeder_sig_enable)
+        self.feeder_sig_eps_bottom = float(feeder_sig_eps_bottom)
+        self.feeder_sig_h_ratio_max = float(feeder_sig_h_ratio_max)
+        self.feeder_sig_w_ratio_min = float(feeder_sig_w_ratio_min)
+        self.feeder_sig_w_ratio_max = float(feeder_sig_w_ratio_max)
+        self.feeder_sig_score_max_reject = float(feeder_sig_score_max_reject)
+        self.feeder_sig_score_min_keep = float(feeder_sig_score_min_keep)
+        self.feeder_group_boxes_norm = feeder_group_boxes_norm or []
 
         # (meta, tensor_index)
         self._out_meta = [(o, o["index"]) for o in self.output_details]
@@ -320,21 +307,34 @@ class SsdDetector:
         def is_excluded(cand: Dict[str, Any]) -> Tuple[bool, Optional[Dict[str, Any]]]:
             """
             Size-aware exclusion vs exclude_boxes_norm using:
-              area_ratio = A_det / A_excl
-              coverage_det = A_intersect / A_det
+            area_ratio = A_det / A_excl
+            coverage_det = A_intersect / A_det
+
             Decision:
-              - no overlap -> ACCEPT
-              - area_ratio >= BIG -> ACCEPT (ignore zone)
-              - area_ratio <= SMALL -> ACCEPT (esp. birds)
-              - else if coverage_det >= HIGH -> EXCLUDE
-              - else -> ACCEPT
+            - no overlap -> ACCEPT
+            - big detect -> ignore zone only if coverage is small
+            - small detect -> ACCEPT (birds hanging on feeder)
+            - else if coverage high -> EXCLUDE
             """
+
             bbox = cand["bbox"]
             a_det = bbox_area(bbox)
-            if a_det <= 0.0 or not self.exclude_boxes_norm:
-                return False, None  # accept
 
-            # Find the exclude box that covers the detection the most (max coverage_det)
+            if a_det <= 0.0:
+                return False, None
+
+            # HARD BIG BOX REJECT (global hallucination guard)
+            if self.big_box_reject > 0.0 and a_det >= self.big_box_reject:
+                dbg = {
+                    "reason": "big_box_reject",
+                    "area_det": a_det,
+                    "thr": self.big_box_reject,
+                }
+                return True, dbg
+
+            if not self.exclude_boxes_norm:
+                return False, None
+
             best_match = None
             best_cov = 0.0
             best_inter = 0.0
@@ -344,7 +344,9 @@ class SsdDetector:
                 inter = bbox_intersection_area(bbox, xb)
                 if inter <= 0.0:
                     continue
-                cov = inter / a_det  # coverage of DET by EXCL
+
+                cov = inter / a_det
+
                 if cov > best_cov:
                     best_cov = cov
                     best_inter = inter
@@ -352,9 +354,8 @@ class SsdDetector:
                     best_a_ex = bbox_area(xb)
 
             if best_match is None:
-                return False, None  # no overlap -> accept
+                return False, None
 
-            # Guard: if exclude box has invalid area, don't exclude
             if best_a_ex <= 0.0:
                 dbg = {
                     "reason": "excl_invalid_area",
@@ -374,21 +375,123 @@ class SsdDetector:
                 "area_det": a_det,
                 "area_excl": best_a_ex,
             }
+            # --- Feeder signature reject (geometry-based) ---
+            if self.feeder_sig_enable:
+                # only act for raw_class == 15 (first iteration)
+                raw_c = int(cand.get("raw_class", -1))
+                score = float(cand.get("score", 0.0))
 
-            # A) Big detection: ignore zone (close bird covering feeder)
+                # High score override: keep (avoid killing real birds)
+                if score >= self.feeder_sig_score_min_keep:
+                    dbg["feeder_sig"] = {"reason": "keep_high_score", "score": score}
+                else:
+                    if raw_c == 15 and score <= self.feeder_sig_score_max_reject:
+                        # pick reference box for feeder signature:
+                        # prefer fixed feeder group union (3-4-5) if provided, else fallback to best_match box
+                        if self.feeder_group_boxes_norm:
+                            xs_min = min(b["xmin"] for b in self.feeder_group_boxes_norm)
+                            ys_min = min(b["ymin"] for b in self.feeder_group_boxes_norm)
+                            xs_max = max(b["xmax"] for b in self.feeder_group_boxes_norm)
+                            ys_max = max(b["ymax"] for b in self.feeder_group_boxes_norm)
+                            ex = {"xmin": xs_min, "ymin": ys_min, "xmax": xs_max, "ymax": ys_max}
+                            dbg["feeder_sig_ref"] = {"type": "feeder_group_union", "count": len(self.feeder_group_boxes_norm)}
+                        else:
+                            ex = best_match["box"]
+                            dbg["feeder_sig_ref"] = {"type": "best_match_box", "idx": best_match["idx"]}
+
+                        ex_ymin = float(ex["ymin"]); ex_ymax = float(ex["ymax"])
+                        ex_xmin = float(ex["xmin"]); ex_xmax = float(ex["xmax"])
+                        ex_h = max(1e-9, ex_ymax - ex_ymin)
+                        ex_w = max(1e-9, ex_xmax - ex_xmin)
+
+                        det_ymin = float(bbox["ymin"]); det_ymax = float(bbox["ymax"])
+                        det_xmin = float(bbox["xmin"]); det_xmax = float(bbox["xmax"])
+                        det_h = max(1e-9, det_ymax - det_ymin)
+                        det_w = max(1e-9, det_xmax - det_xmin)
+
+                        bottom_delta = abs(det_ymax - ex_ymax)
+                        h_ratio = det_h / ex_h
+                        w_ratio = det_w / ex_w
+
+                        sig_ok = (
+                            bottom_delta <= self.feeder_sig_eps_bottom
+                            and h_ratio <= self.feeder_sig_h_ratio_max
+                            and w_ratio >= self.feeder_sig_w_ratio_min
+                            and w_ratio <= self.feeder_sig_w_ratio_max
+                        )
+
+                        dbg["feeder_sig"] = {
+                            "bottom_delta": bottom_delta,
+                            "h_ratio": h_ratio,
+                            "w_ratio": w_ratio,
+                            "sig_ok": sig_ok,
+                            "score": score,
+                            "raw_class": raw_c,
+                        }
+
+                        if sig_ok:
+                            dbg["reason"] = "feeder_signature_reject"
+                            return True, dbg
+            # --- end feeder signature ---
+           
+      
+                       
+
+            # BIG DETECT (bird covering feeder) -> ignore zone only if coverage small
             if area_ratio >= self.exclude_area_ratio_big:
-                dbg["reason"] = "zone_ignored_big_detect"
-                return False, dbg
+                # only allow big-ignore when detection is also "big enough" on the whole frame
+                if a_det >= self.exclude_big_ignore_min_area and best_cov <= self.exclude_coverage_max_for_big_ignore:
+                    dbg["reason"] = "zone_ignored_big_detect"
+                    return False, dbg
 
-            # B) Small detection inside a larger exclude zone: allow (hanging bird)
+                dbg["reason"] = "big_detect_but_high_coverage"
+                # continue evaluation
+            
+            # nagyobb fél-etető / etetőtest halu
+            if (
+                best_match["idx"] == 3
+                and (dbg.get("feeder_sig") or {}).get("sig_ok", None) is False
+                and area_ratio > 1.0
+            ):
+                dbg["reason"] = "reject_feeder_body_fp"
+                return True, dbg
+            
+            # SMALL DETECT (bird inside feeder zone)
             if area_ratio <= self.exclude_area_ratio_small:
-                if cand.get("class") == (tgt if tgt is not None else cand.get("class")):
+                c_eff = int(cand.get("class", -1))
+
+                feeder_sig = dbg.get("feeder_sig") or {}
+                sig_ok = feeder_sig.get("sig_ok", None)
+
+                # generic high-coverage FP guard:
+                # ha a detekt szinte teljesen exclude-ban ül, és a feeder signature szerint nem madár,
+                # akkor ne engedjük át small_detect_allow_bird ágon
+                if (
+                    c_eff == 15
+                    and sig_ok is False
+                    and best_cov >= 0.85
+                ):
+                    dbg["reason"] = "reject_high_coverage_false_fp"
+                    return True, dbg
+
+                # feeder/kupak célzott guard
+                if (
+                    c_eff == 15
+                    and best_match["idx"] == 3
+                    and sig_ok is False
+                    and best_cov >= 0.55
+                    and a_det <= 0.03
+                ):
+                    dbg["reason"] = "reject_feeder_cap_small_fp"
+                    return True, dbg
+
+                if c_eff == 15:
                     dbg["reason"] = "small_detect_allow_bird"
                 else:
                     dbg["reason"] = "small_detect_allow"
-                return False, dbg
 
-            # C) Similar size: exclude only if detection is mostly inside exclude zone
+                return False, dbg
+            # SIMILAR SIZE -> exclude if coverage high
             if best_cov >= self.exclude_coverage_det_high:
                 dbg["reason"] = "similar_size_high_coverage"
                 return True, dbg
@@ -402,27 +505,51 @@ class SsdDetector:
         excluded_samples: List[Dict[str, Any]] = []
 
         for cand in candidates:
+            bbox = cand.get("bbox") or {}
+            area_det = bbox_area(bbox)
+
+            # 0) Global big-box reject (skip everything else)
+            if area_det >= self.big_box_reject:
+                skipped += 1
+                # opcionális debug minták
+                if len(excluded_samples) < 5:
+                    excluded_samples.append(
+                        {
+                            "score": cand.get("score"),
+                            "class": cand.get("class"),
+                            "raw_class": cand.get("raw_class"),
+                            "bbox": bbox,
+                            "exclude": {
+                                "reason": "global_big_box",
+                                "area_det": area_det,
+                                "thr": self.big_box_reject,
+                            },
+                        }
+                    )
+                continue
+
+            # 1) Size-aware exclude logic
             excluded, dbg = is_excluded(cand)
             if excluded:
                 skipped += 1
-                # opcionális: tegyünk el pár mintát debughoz
                 if dbg and len(excluded_samples) < 5:
                     excluded_samples.append(
                         {
                             "score": cand.get("score"),
                             "class": cand.get("class"),
                             "raw_class": cand.get("raw_class"),
-                            "bbox": cand.get("bbox"),
+                            "bbox": bbox,
                             "exclude": dbg,
                         }
                     )
                 continue
 
-            # opcionális: a kept top10-hez is betehetjük a debugot (ha akarod)
+            # 2) kept list: tedd rá a debugot ha van
             if dbg:
                 cand["exclude_eval"] = dbg
 
             kept.append(cand)
+        
 
         best = kept[0] if kept else None
 
@@ -586,21 +713,29 @@ def create_app() -> FastAPI:
 
     # exclusion filters (skip common false positives like the feeder)
     exclude_boxes_norm = parse_exclude_boxes_norm(os.environ.get("BIRDCAM_EXCLUDE_BOXES_NORM", ""))
+    feeder_group_boxes_norm = parse_exclude_boxes_norm(os.environ.get("BIRDCAM_FEEDER_GROUP_BOXES_NORM", ""))
     exclude_iou = float(os.environ.get("BIRDCAM_EXCLUDE_IOU", "0.25"))
     exclude_aspect_min = float(os.environ.get("BIRDCAM_EXCLUDE_ASPECT_MIN", "0"))
     exclude_area_min = float(os.environ.get("BIRDCAM_EXCLUDE_AREA_MIN", "0"))
     exclude_area_max = float(os.environ.get("BIRDCAM_EXCLUDE_AREA_MAX", "1"))
-    exclude_dx = float(os.environ.get("BIRDCAM_EXCLUDE_DX", "0.0"))
-    exclude_dy = float(os.environ.get("BIRDCAM_EXCLUDE_DY", "0.0"))
-    if exclude_boxes_norm and (exclude_dx != 0.0 or exclude_dy != 0.0):
-        exclude_boxes_norm = shift_exclude_boxes_norm(exclude_boxes_norm, exclude_dx, exclude_dy)
     # new size-aware exclude logic thresholds
     exclude_area_ratio_big = float(os.environ.get("BIRDCAM_EXCLUDE_AREA_RATIO_BIG", "1.5"))
     exclude_area_ratio_small = float(os.environ.get("BIRDCAM_EXCLUDE_AREA_RATIO_SMALL", "0.5"))
-    exclude_coverage_det_high = float(os.environ.get("BIRDCAM_EXCLUDE_COVERAGE_DET_HIGH", "0.75"))
+    exclude_coverage_det_high = float(os.environ.get("BIRDCAM_EXCLUDE_COVERAGE_DET_HIGH", "0.55"))
+    exclude_coverage_max_for_big_ignore = float(os.environ.get("BIRDCAM_EXCLUDE_COVERAGE_MAX_FOR_BIG_IGNORE", "0.25"))
+    exclude_big_ignore_min_area = float(os.environ.get("BIRDCAM_EXCLUDE_BIG_IGNORE_MIN_AREA", "0.30"))
+    big_box_reject = float(os.environ.get("BIRDCAM_BIG_BOX_REJECT", "0.75"))
+    # Feeder signature reject (geometry)
+    feeder_sig_enable = os.environ.get("BIRDCAM_FEEDER_SIG_ENABLE", "1") == "1"
+    feeder_sig_eps_bottom = float(os.environ.get("BIRDCAM_FEEDER_SIG_EPS_BOTTOM", "0.010"))
+    feeder_sig_h_ratio_max = float(os.environ.get("BIRDCAM_FEEDER_SIG_H_RATIO_MAX", "1.15"))
+    feeder_sig_w_ratio_min = float(os.environ.get("BIRDCAM_FEEDER_SIG_W_RATIO_MIN", "0.70"))
+    feeder_sig_w_ratio_max = float(os.environ.get("BIRDCAM_FEEDER_SIG_W_RATIO_MAX", "1.40"))
+    feeder_sig_score_max_reject = float(os.environ.get("BIRDCAM_FEEDER_SIG_SCORE_MAX_REJECT", "0.35"))
+    feeder_sig_score_min_keep = float(os.environ.get("BIRDCAM_FEEDER_SIG_SCORE_MIN_KEEP", "0.55"))
     # class0 promotion: treat class 0 as "bird" if score >= threshold
     class0_as_bird_min_conf = float(os.environ.get("BIRDCAM_CLASS0_AS_BIRD_MIN_CONF", "0.50"))
-     
+    
     det = SsdDetector(
         model_path=model,
         num_threads=threads,
@@ -613,6 +748,17 @@ def create_app() -> FastAPI:
         exclude_area_ratio_big=exclude_area_ratio_big,
         exclude_area_ratio_small=exclude_area_ratio_small,
         exclude_coverage_det_high=exclude_coverage_det_high,
+        exclude_coverage_max_for_big_ignore=exclude_coverage_max_for_big_ignore,
+        exclude_big_ignore_min_area=exclude_big_ignore_min_area,
+        big_box_reject=big_box_reject,
+        feeder_sig_enable=feeder_sig_enable,
+        feeder_sig_eps_bottom=feeder_sig_eps_bottom,
+        feeder_sig_h_ratio_max=feeder_sig_h_ratio_max,
+        feeder_sig_w_ratio_min=feeder_sig_w_ratio_min,
+        feeder_sig_w_ratio_max=feeder_sig_w_ratio_max,
+        feeder_sig_score_max_reject=feeder_sig_score_max_reject,
+        feeder_sig_score_min_keep=feeder_sig_score_min_keep,
+        feeder_group_boxes_norm=feeder_group_boxes_norm,
     )
     app = FastAPI(title="birdcam_local_ai", version="1.0.3")
 
@@ -650,10 +796,21 @@ def create_app() -> FastAPI:
                 "area_max": exclude_area_max,
                 "area_ratio_big": exclude_area_ratio_big,
                 "area_ratio_small": exclude_area_ratio_small,
+                "coverage_max_for_big_ignore": exclude_coverage_max_for_big_ignore,
                 "coverage_det_high": exclude_coverage_det_high,
-                "dx": exclude_dx,
-                "dy": exclude_dy,
+                "big_ignore_min_area": exclude_big_ignore_min_area,
+                "feeder_sig": {
+                    "enable": feeder_sig_enable,
+                    "eps_bottom": feeder_sig_eps_bottom,
+                    "h_ratio_max": feeder_sig_h_ratio_max,
+                    "w_ratio_min": feeder_sig_w_ratio_min,
+                    "w_ratio_max": feeder_sig_w_ratio_max,
+                    "score_max_reject": feeder_sig_score_max_reject,
+                    "score_min_keep": feeder_sig_score_min_keep,
+                    "feeder_group_boxes_norm": feeder_group_boxes_norm,
+                },
             "class0_as_bird_min_conf": class0_as_bird_min_conf,
+            "big_box_reject": big_box_reject,
             },
         }
 
