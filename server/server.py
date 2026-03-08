@@ -439,6 +439,7 @@ class SsdDetector:
                 best_match is not None
                 and best_match["idx"] == 3
                 and area_ratio > 1.0
+                and a_det <= 0.15
             ):
                             
                 dbg["reason"] = "reject_feeder_body_fp"
