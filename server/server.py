@@ -83,6 +83,42 @@ def bbox_intersection_area(a: Dict[str, float], b: Dict[str, float]) -> float:
     ih = max(0.0, iy2 - iy1)
     return iw * ih
 
+def clamp_bbox_norm(b: Dict[str, float]) -> Optional[Dict[str, float]]:
+    xmin = clamp(float(b["xmin"]), 0.0, 1.0)
+    ymin = clamp(float(b["ymin"]), 0.0, 1.0)
+    xmax = clamp(float(b["xmax"]), 0.0, 1.0)
+    ymax = clamp(float(b["ymax"]), 0.0, 1.0)
+
+    if xmax <= xmin or ymax <= ymin:
+        return None
+
+    return {
+        "xmin": xmin,
+        "ymin": ymin,
+        "xmax": xmax,
+        "ymax": ymax,
+    }
+
+def shift_boxes_norm(
+    boxes: List[Dict[str, float]],
+    dx: float,
+    dy: float,
+) -> List[Dict[str, float]]:
+    out: List[Dict[str, float]] = []
+
+    for b in boxes:
+        shifted = {
+            "xmin": float(b["xmin"]) + dx,
+            "ymin": float(b["ymin"]) + dy,
+            "xmax": float(b["xmax"]) + dx,
+            "ymax": float(b["ymax"]) + dy,
+        }
+        clamped = clamp_bbox_norm(shifted)
+        if clamped is not None:
+            out.append(clamped)
+
+    return out
+
 def parse_exclude_boxes_norm(s: str) -> List[Dict[str, float]]:
     # "xmin,ymin,xmax,ymax; xmin,ymin,xmax,ymax"
     out: List[Dict[str, float]] = []
@@ -722,6 +758,14 @@ def create_app() -> FastAPI:
     # exclusion filters (skip common false positives like the feeder)
     exclude_boxes_norm = parse_exclude_boxes_norm(os.environ.get("BIRDCAM_EXCLUDE_BOXES_NORM", ""))
     feeder_group_boxes_norm = parse_exclude_boxes_norm(os.environ.get("BIRDCAM_FEEDER_GROUP_BOXES_NORM", ""))
+    exclude_dx = float(os.environ.get("BIRDCAM_EXCLUDE_DX", "0.0"))
+    exclude_dy = float(os.environ.get("BIRDCAM_EXCLUDE_DY", "0.0"))
+
+    if exclude_boxes_norm and (exclude_dx != 0.0 or exclude_dy != 0.0):
+        exclude_boxes_norm = shift_boxes_norm(exclude_boxes_norm, exclude_dx, exclude_dy)
+
+    if feeder_group_boxes_norm and (exclude_dx != 0.0 or exclude_dy != 0.0):
+        feeder_group_boxes_norm = shift_boxes_norm(feeder_group_boxes_norm, exclude_dx, exclude_dy)
     exclude_iou = float(os.environ.get("BIRDCAM_EXCLUDE_IOU", "0.25"))
     exclude_aspect_min = float(os.environ.get("BIRDCAM_EXCLUDE_ASPECT_MIN", "0"))
     exclude_area_min = float(os.environ.get("BIRDCAM_EXCLUDE_AREA_MIN", "0"))
@@ -816,6 +860,8 @@ def create_app() -> FastAPI:
                     "score_max_reject": feeder_sig_score_max_reject,
                     "score_min_keep": feeder_sig_score_min_keep,
                     "feeder_group_boxes_norm": feeder_group_boxes_norm,
+                    "dx": exclude_dx,
+                    "dy": exclude_dy,
                 },
             "class0_as_bird_min_conf": class0_as_bird_min_conf,
             "big_box_reject": big_box_reject,
