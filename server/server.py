@@ -788,7 +788,7 @@ def create_app() -> FastAPI:
     # class0 promotion: treat class 0 as "bird" if score >= threshold
     class0_as_bird_min_conf = float(os.environ.get("BIRDCAM_CLASS0_AS_BIRD_MIN_CONF", "0.50"))
     
-    det, _, _ = build_detector_for_request()
+    
     
     app = FastAPI(title="birdcam_local_ai", version="1.0.3")
     def _copy_boxes(boxes: List[Dict[str, float]]) -> List[Dict[str, float]]:
@@ -834,7 +834,9 @@ def create_app() -> FastAPI:
             feeder_sig_score_min_keep=feeder_sig_score_min_keep,
             feeder_group_boxes_norm=feeder_group_boxes_norm,
         )
-        return det_req, eff_dx, eff_dy   
+        return det_req, eff_dx, eff_dy  
+    det, _, _ = build_detector_for_request()
+
     def pick_roi_for_image(h: int, w: int, use_roi_req: bool) -> Optional[Tuple[int, int, int, int]]:
         if not use_roi_req:
             return None
@@ -862,7 +864,7 @@ def create_app() -> FastAPI:
             "roi_landscape": roi_landscape_s,
             "roi_portrait": roi_portrait_s,
             "exclude": {
-                "boxes_norm": exclude_boxes_norm,
+                "boxes_norm": det.exclude_boxes_norm,
                 "iou": exclude_iou,
                 "aspect_min": exclude_aspect_min,
                 "area_min": exclude_area_min,
@@ -880,7 +882,7 @@ def create_app() -> FastAPI:
                     "w_ratio_max": feeder_sig_w_ratio_max,
                     "score_max_reject": feeder_sig_score_max_reject,
                     "score_min_keep": feeder_sig_score_min_keep,
-                    "feeder_group_boxes_norm": feeder_group_boxes_norm,
+                    "feeder_group_boxes_norm": det.feeder_group_boxes_norm,
                     "dx": exclude_dx_env,
                     "dy": exclude_dy_env,
                 },
@@ -951,7 +953,7 @@ def create_app() -> FastAPI:
         roi = pick_roi_for_image(h, w, use_roi_req)
         det_req, eff_dx, eff_dy = build_detector_for_request(dx_q, dy_q)
         mc = default_min_conf if min_conf is None else float(min_conf)
-        r = det.best_detection_any(p, min_conf=mc, use_roi=use_roi_req, roi=roi, target_class=default_target_class)
+        r = det_req.best_detection_any(p, min_conf=mc, use_roi=use_roi_req, roi=roi, target_class=default_target_class)
 
         # Also dump raw top10 on the (possibly cropped) image for diagnosis
         crop = img
