@@ -756,16 +756,16 @@ def create_app() -> FastAPI:
     default_target_class = int(os.environ.get("BIRDCAM_TARGET_CLASS", "15"))
 
     # exclusion filters (skip common false positives like the feeder)
-    exclude_boxes_norm = parse_exclude_boxes_norm(os.environ.get("BIRDCAM_EXCLUDE_BOXES_NORM", ""))
-    feeder_group_boxes_norm = parse_exclude_boxes_norm(os.environ.get("BIRDCAM_FEEDER_GROUP_BOXES_NORM", ""))
-    exclude_dx = float(os.environ.get("BIRDCAM_EXCLUDE_DX", "0.0"))
-    exclude_dy = float(os.environ.get("BIRDCAM_EXCLUDE_DY", "0.0"))
+    exclude_boxes_norm_raw = parse_exclude_boxes_norm(os.environ.get("BIRDCAM_EXCLUDE_BOXES_NORM", ""))
+    feeder_group_boxes_norm_raw = parse_exclude_boxes_norm(os.environ.get("BIRDCAM_FEEDER_GROUP_BOXES_NORM", ""))
+    exclude_dx_env = float(os.environ.get("BIRDCAM_EXCLUDE_DX", "0.0"))
+    exclude_dy_env = float(os.environ.get("BIRDCAM_EXCLUDE_DY", "0.0"))
 
-    if exclude_boxes_norm and (exclude_dx != 0.0 or exclude_dy != 0.0):
-        exclude_boxes_norm = shift_boxes_norm(exclude_boxes_norm, exclude_dx, exclude_dy)
+    #if exclude_boxes_norm and (exclude_dx != 0.0 or exclude_dy != 0.0):
+    #    exclude_boxes_norm = shift_boxes_norm(exclude_boxes_norm, exclude_dx, exclude_dy)
 
-    if feeder_group_boxes_norm and (exclude_dx != 0.0 or exclude_dy != 0.0):
-        feeder_group_boxes_norm = shift_boxes_norm(feeder_group_boxes_norm, exclude_dx, exclude_dy)
+    #if feeder_group_boxes_norm and (exclude_dx != 0.0 or exclude_dy != 0.0):
+    #    feeder_group_boxes_norm = shift_boxes_norm(feeder_group_boxes_norm, exclude_dx, exclude_dy)
     exclude_iou = float(os.environ.get("BIRDCAM_EXCLUDE_IOU", "0.25"))
     exclude_aspect_min = float(os.environ.get("BIRDCAM_EXCLUDE_ASPECT_MIN", "0"))
     exclude_area_min = float(os.environ.get("BIRDCAM_EXCLUDE_AREA_MIN", "0"))
@@ -788,32 +788,53 @@ def create_app() -> FastAPI:
     # class0 promotion: treat class 0 as "bird" if score >= threshold
     class0_as_bird_min_conf = float(os.environ.get("BIRDCAM_CLASS0_AS_BIRD_MIN_CONF", "0.50"))
     
-    det = SsdDetector(
-        model_path=model,
-        num_threads=threads,
-        exclude_boxes_norm=exclude_boxes_norm,
-        exclude_iou=exclude_iou,
-        exclude_aspect_min=exclude_aspect_min,
-        exclude_area_min=exclude_area_min,
-        exclude_area_max=exclude_area_max,
-        class0_as_bird_min_conf=class0_as_bird_min_conf,
-        exclude_area_ratio_big=exclude_area_ratio_big,
-        exclude_area_ratio_small=exclude_area_ratio_small,
-        exclude_coverage_det_high=exclude_coverage_det_high,
-        exclude_coverage_max_for_big_ignore=exclude_coverage_max_for_big_ignore,
-        exclude_big_ignore_min_area=exclude_big_ignore_min_area,
-        big_box_reject=big_box_reject,
-        feeder_sig_enable=feeder_sig_enable,
-        feeder_sig_eps_bottom=feeder_sig_eps_bottom,
-        feeder_sig_h_ratio_max=feeder_sig_h_ratio_max,
-        feeder_sig_w_ratio_min=feeder_sig_w_ratio_min,
-        feeder_sig_w_ratio_max=feeder_sig_w_ratio_max,
-        feeder_sig_score_max_reject=feeder_sig_score_max_reject,
-        feeder_sig_score_min_keep=feeder_sig_score_min_keep,
-        feeder_group_boxes_norm=feeder_group_boxes_norm,
-    )
+    det, _, _ = build_detector_for_request()
+    
     app = FastAPI(title="birdcam_local_ai", version="1.0.3")
+    def _copy_boxes(boxes: List[Dict[str, float]]) -> List[Dict[str, float]]:
+        return [dict(b) for b in boxes]
 
+    def build_detector_for_request(
+        dx_q: Optional[float] = None,
+        dy_q: Optional[float] = None,
+    ) -> Tuple[SsdDetector, float, float]:
+        eff_dx = exclude_dx_env if dx_q is None else float(dx_q)
+        eff_dy = exclude_dy_env if dy_q is None else float(dy_q)
+
+        exclude_boxes_norm = _copy_boxes(exclude_boxes_norm_raw)
+        feeder_group_boxes_norm = _copy_boxes(feeder_group_boxes_norm_raw)
+
+        if exclude_boxes_norm and (eff_dx != 0.0 or eff_dy != 0.0):
+            exclude_boxes_norm = shift_boxes_norm(exclude_boxes_norm, eff_dx, eff_dy)
+
+        if feeder_group_boxes_norm and (eff_dx != 0.0 or eff_dy != 0.0):
+            feeder_group_boxes_norm = shift_boxes_norm(feeder_group_boxes_norm, eff_dx, eff_dy)
+
+        det_req = SsdDetector(
+            model_path=model,
+            num_threads=threads,
+            exclude_boxes_norm=exclude_boxes_norm,
+            exclude_iou=exclude_iou,
+            exclude_aspect_min=exclude_aspect_min,
+            exclude_area_min=exclude_area_min,
+            exclude_area_max=exclude_area_max,
+            class0_as_bird_min_conf=class0_as_bird_min_conf,
+            exclude_area_ratio_big=exclude_area_ratio_big,
+            exclude_area_ratio_small=exclude_area_ratio_small,
+            exclude_coverage_det_high=exclude_coverage_det_high,
+            exclude_coverage_max_for_big_ignore=exclude_coverage_max_for_big_ignore,
+            exclude_big_ignore_min_area=exclude_big_ignore_min_area,
+            big_box_reject=big_box_reject,
+            feeder_sig_enable=feeder_sig_enable,
+            feeder_sig_eps_bottom=feeder_sig_eps_bottom,
+            feeder_sig_h_ratio_max=feeder_sig_h_ratio_max,
+            feeder_sig_w_ratio_min=feeder_sig_w_ratio_min,
+            feeder_sig_w_ratio_max=feeder_sig_w_ratio_max,
+            feeder_sig_score_max_reject=feeder_sig_score_max_reject,
+            feeder_sig_score_min_keep=feeder_sig_score_min_keep,
+            feeder_group_boxes_norm=feeder_group_boxes_norm,
+        )
+        return det_req, eff_dx, eff_dy   
     def pick_roi_for_image(h: int, w: int, use_roi_req: bool) -> Optional[Tuple[int, int, int, int]]:
         if not use_roi_req:
             return None
@@ -860,8 +881,8 @@ def create_app() -> FastAPI:
                     "score_max_reject": feeder_sig_score_max_reject,
                     "score_min_keep": feeder_sig_score_min_keep,
                     "feeder_group_boxes_norm": feeder_group_boxes_norm,
-                    "dx": exclude_dx,
-                    "dy": exclude_dy,
+                    "dx": exclude_dx_env,
+                    "dy": exclude_dy_env,
                 },
             "class0_as_bird_min_conf": class0_as_bird_min_conf,
             "big_box_reject": big_box_reject,
@@ -875,6 +896,8 @@ def create_app() -> FastAPI:
         min_conf: Optional[float] = Query(None, ge=0.0, le=1.0),
         save: bool = Query(True, description="append result.txt into the run folder"),
         use_roi_q: Optional[bool] = Query(None, alias="use_roi", description="Override ROI for this request"),
+        dx_q: Optional[float] = Query(None, alias="dx", description="Override exclude DX for this request"),
+        dy_q: Optional[float] = Query(None, alias="dy", description="Override exclude DY for this request"),
     ):
         try:
             folder = build_run_folder(base, date, time_)
@@ -896,9 +919,9 @@ def create_app() -> FastAPI:
                     h, w = img.shape[:2]
                     roi = pick_roi_for_image(h, w, use_roi_req)
                     break
-
+        det_req, eff_dx, eff_dy = build_detector_for_request(dx_q, dy_q)            
         mc = default_min_conf if min_conf is None else float(min_conf)
-        return classify_folder(det, folder, mc, save, enable_spatial, reject_yc, use_roi_req, roi, default_target_class)
+        return classify_folder(det_req, folder, mc, save, enable_spatial, reject_yc, use_roi_req, roi, default_target_class)
 
     @app.get("/debug_one")
     def debug_one(
@@ -907,6 +930,8 @@ def create_app() -> FastAPI:
         frame: int = Query(1, ge=1, le=4),
         min_conf: Optional[float] = Query(None, ge=0.0, le=1.0),
         use_roi_q: Optional[bool] = Query(None, alias='use_roi', description='Override ROI for this request'),
+        dx_q: Optional[float] = Query(None, alias="dx", description="Override exclude DX for this request"),
+        dy_q: Optional[float] = Query(None, alias="dy", description="Override exclude DY for this request"),
     ):
         try:
             folder = build_run_folder(base, date, time_)
@@ -924,7 +949,7 @@ def create_app() -> FastAPI:
         h, w = img.shape[:2]
         use_roi_req = use_roi if use_roi_q is None else bool(use_roi_q)
         roi = pick_roi_for_image(h, w, use_roi_req)
-
+        det_req, eff_dx, eff_dy = build_detector_for_request(dx_q, dy_q)
         mc = default_min_conf if min_conf is None else float(min_conf)
         r = det.best_detection_any(p, min_conf=mc, use_roi=use_roi_req, roi=roi, target_class=default_target_class)
 
@@ -939,7 +964,7 @@ def create_app() -> FastAPI:
                 crop = img[y1:y2, x1:x2].copy()
                 roi_box = (x1, y1, x2, y2)
 
-        boxes, classes, scores = det.run_ssd(crop)
+        boxes, classes, scores = det_req.run_ssd(crop)
         idxs = np.argsort(scores)[::-1][:10]
         top10 = []
         for i in idxs:
@@ -960,7 +985,7 @@ def create_app() -> FastAPI:
             })
 
         od = []
-        for o in det.output_details:
+        for o in det_req.output_details:
             od.append(
                 {
                     "name": o.get("name"),
@@ -985,6 +1010,8 @@ def create_app() -> FastAPI:
             "classes_minmax": [int(np.min(classes)) if classes.size else 0, int(np.max(classes)) if classes.size else 0],
             "top10": top10,
             "note": "top10 and best bboxes are mapped to FULL image normalized coords.",
+            "dx": eff_dx,
+            "dy": eff_dy,
         }
 
     @app.get("/debug_draw")
@@ -999,6 +1026,8 @@ def create_app() -> FastAPI:
         use_roi_q: Optional[bool] = Query(None, alias='use_roi', description='Override ROI for this request'),
         draw_excludes: bool = Query(True, description="Draw exclusion zones on debug image"),
         draw_top10: bool = Query(False, description="Draw top10 raw detections in purple"),
+        dx_q: Optional[float] = Query(None, alias="dx", description="Override exclude DX for this request"),
+        dy_q: Optional[float] = Query(None, alias="dy", description="Override exclude DY for this request"),
     ):
         try:
             folder = build_run_folder(base, date, time_)
@@ -1017,10 +1046,11 @@ def create_app() -> FastAPI:
 
         use_roi_req = use_roi if use_roi_q is None else bool(use_roi_q)
         roi = pick_roi_for_image(h, w, use_roi_req)
+        det_req, eff_dx, eff_dy = build_detector_for_request(dx_q, dy_q)
         mc = default_min_conf if min_conf is None else float(min_conf)
 
         # Existing filtered best (kept for reference/comparison)
-        r = det.best_detection_any(
+        r = det_req.best_detection_any(
             img_path,
             min_conf=mc,
             use_roi=use_roi_req,
@@ -1042,7 +1072,7 @@ def create_app() -> FastAPI:
                 crop = img[y1:y2, x1:x2].copy()
                 roi_box = (x1, y1, x2, y2)
 
-        boxes, classes, scores = det.run_ssd(crop)
+        boxes, classes, scores = det_req.run_ssd(crop)
 
         def map_bbox_to_full(b: np.ndarray) -> Dict[str, float]:
             ymin, xmin, ymax, xmax = [float(x) for x in b]
@@ -1088,8 +1118,8 @@ def create_app() -> FastAPI:
             cv2.rectangle(out_img, (x1, y1), (x2, y2), (255, 255, 0), 2)
 
         # Draw exclusion zones (red)
-        if draw_excludes and getattr(det, "exclude_boxes_norm", None):
-            for xb in det.exclude_boxes_norm:
+        if draw_excludes and getattr(det_req, "exclude_boxes_norm", None):
+            for xb in det_req.exclude_boxes_norm:
                 ex1 = int(clamp(float(xb["xmin"]) * w, 0, w - 1))
                 ey1 = int(clamp(float(xb["ymin"]) * h, 0, h - 1))
                 ex2 = int(clamp(float(xb["xmax"]) * w, 0, w - 1))
@@ -1108,7 +1138,7 @@ def create_app() -> FastAPI:
         # Existing option: draw raw top10 detections (purple) on FULL image
         # (kept as-is; if ROI is used this reflects full-image inference, not ROI inference)
         if draw_top10:
-            boxes10, classes10, scores10 = det.run_ssd(img)
+            boxes10, classes10, scores10 = det_req.run_ssd(img)
             idxs = np.argsort(scores10)[::-1][:10]
             for i in idxs:
                 ymin, xmin, ymax, xmax = [float(x) for x in boxes10[i]]
@@ -1186,7 +1216,9 @@ def create_app() -> FastAPI:
             "raw_top": raw_top,
             "raw_bird": raw_bird,
             "draw_excludes": bool(draw_excludes),
-            "exclude_boxes_norm": det.exclude_boxes_norm if draw_excludes else None,
+            "dx": eff_dx,
+            "dy": eff_dy,
+            "exclude_boxes_norm": det_req.exclude_boxes_norm if draw_excludes else None,
             "note": "Saved image with ROI(cyan), Excluded(red), RAW TOP(green), RAW BIRD15(yellow), BEST(filtered orange). Bboxes are full-image norm coords.",
         }
 
