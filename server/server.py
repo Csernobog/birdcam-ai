@@ -504,7 +504,7 @@ class SsdDetector:
                             
                 dbg["reason"] = "reject_feeder_body_fp"
                 return True, dbg   
-                        # köztes feeder FP: kamera elmozdulás / bólintás után
+            # köztes feeder FP: kamera elmozdulás / bólintás után
             # tipikus jelleg:
             # - feeder_sig szerint nem madár
             # - közepes coverage
@@ -527,7 +527,24 @@ class SsdDetector:
                     dbg["reason"] = "reject_feeder_mid_fp"
                     return True, dbg
 
-           
+            # felső nagy-zónás big-box FP
+            if (
+                best_match is not None
+                and best_match["idx"] in (0, 1)
+            ):
+                feeder_sig = dbg.get("feeder_sig") or {}
+                sig_ok = feeder_sig.get("sig_ok", None)
+                score_eff = float(cand.get("score", 0.0))
+
+                if (
+                    sig_ok is False
+                    and area_ratio >= 2.0
+                    and a_det >= 0.50
+                    and score_eff <= 0.30
+                ):
+                    dbg["reason"] = "reject_topzone_bigbox_fp"
+                    return True, dbg
+                
             # BIG DETECT (bird covering feeder) -> ignore zone only if coverage small
             if area_ratio >= self.exclude_area_ratio_big:
                 # only allow big-ignore when detection is also "big enough" on the whole frame
