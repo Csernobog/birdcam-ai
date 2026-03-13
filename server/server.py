@@ -99,6 +99,30 @@ def clamp_bbox_norm(b: Dict[str, float]) -> Optional[Dict[str, float]]:
         "ymax": ymax,
     }
 
+def shift_exclude_boxes_norm(
+    boxes: List[Dict[str, float]],
+    dx: float,
+    dy: float,
+) -> List[Dict[str, float]]:
+    out: List[Dict[str, float]] = []
+
+    for i, b in enumerate(boxes):
+        if i < 2:
+            clamped = clamp_bbox_norm(b)
+        else:
+            shifted = {
+                "xmin": float(b["xmin"]) + dx,
+                "ymin": float(b["ymin"]) + dy,
+                "xmax": float(b["xmax"]) + dx,
+                "ymax": float(b["ymax"]) + dy,
+            }
+            clamped = clamp_bbox_norm(shifted)
+
+        if clamped is not None:
+            out.append(clamped)
+
+    return out
+
 def shift_boxes_norm(
     boxes: List[Dict[str, float]],
     dx: float,
@@ -828,7 +852,7 @@ def create_app() -> FastAPI:
         feeder_group_boxes_norm = _copy_boxes(feeder_group_boxes_norm_raw)
 
         if exclude_boxes_norm and (eff_dx != 0.0 or eff_dy != 0.0):
-            exclude_boxes_norm = shift_boxes_norm(exclude_boxes_norm, eff_dx, eff_dy)
+            exclude_boxes_norm = shift_exclude_boxes_norm(exclude_boxes_norm, eff_dx, eff_dy)
 
         if feeder_group_boxes_norm and (eff_dx != 0.0 or eff_dy != 0.0):
             feeder_group_boxes_norm = shift_boxes_norm(feeder_group_boxes_norm, eff_dx, eff_dy)
