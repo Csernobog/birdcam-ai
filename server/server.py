@@ -544,7 +544,30 @@ class SsdDetector:
                 ):
                     dbg["reason"] = "reject_topzone_bigbox_fp"
                     return True, dbg
-                
+            # etető-magasságú, de túl széles feeder FP
+            if best_match is not None and best_match["idx"] == 3:
+                score_eff = float(cand.get("score", 0.0))
+                w_ratio = None
+                h_ratio = None
+
+                feeder_sig = dbg.get("feeder_sig") or {}
+                if feeder_sig:
+                    w_ratio = feeder_sig.get("w_ratio", None)
+                    h_ratio = feeder_sig.get("h_ratio", None)
+
+                if (
+                    area_ratio >= 2.0
+                    and area_ratio <= 3.2
+                    and a_det >= 0.10
+                    and a_det <= 0.20
+                    and score_eff <= 0.50
+                    and (
+                        (w_ratio is not None and w_ratio >= 1.5)
+                        or (w_ratio is None)
+                    )
+                ):
+                    dbg["reason"] = "reject_feeder_wide_fp"
+                    return True, dbg    
             # BIG DETECT (bird covering feeder) -> ignore zone only if coverage small
             if area_ratio >= self.exclude_area_ratio_big:
                 # only allow big-ignore when detection is also "big enough" on the whole frame
