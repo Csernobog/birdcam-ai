@@ -516,7 +516,7 @@ class SsdDetector:
                 score_eff = float(cand.get("score", 0.0))
 
                 if (
-                    sig_ok is False
+                    (sig_ok is False or sig_ok is None)
                     and best_cov >= 0.50
                     and best_cov < self.exclude_coverage_det_high
                     and area_ratio >= 0.75
