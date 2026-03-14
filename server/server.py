@@ -594,7 +594,7 @@ class SsdDetector:
                 sig_ok = feeder_sig.get("sig_ok", None)
 
                 if (
-                    sig_ok is False
+                    (sig_ok is False or sig_ok is None)
                     and best_cov >= 0.40
                     and best_cov <= 0.70
                     and a_det >= 0.020
