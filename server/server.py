@@ -587,17 +587,21 @@ class SsdDetector:
                 dbg["reason"] = "reject_feeder_body_fp"
                 return True, dbg
             
-            # feeder small-box FP: kupak / felső etetőrész kis, de túl erős halu
+            # feeder small-box FP: kupak / felső etetőrész kis/közepes halu
             if best_match is not None and best_match["idx"] == 3:
                 score_eff = float(cand.get("score", 0.0))
+                feeder_sig = dbg.get("feeder_sig") or {}
+                sig_ok = feeder_sig.get("sig_ok", None)
 
                 if (
-                    best_cov >= 0.57
+                    sig_ok is False
+                    and best_cov >= 0.40
+                    and best_cov <= 0.70
                     and a_det >= 0.020
                     and a_det <= 0.035
                     and area_ratio >= 0.35
                     and area_ratio <= 0.60
-                    and score_eff >= 0.36
+                    and score_eff >= 0.26
                 ):
                     dbg["reason"] = "reject_feeder_small_hot_fp"
                     return True, dbg
