@@ -596,10 +596,10 @@ class SsdDetector:
                 if (
                     (sig_ok is False or sig_ok is None)
                     and best_cov >= 0.40
-                    and best_cov <= 0.70
-                    and a_det >= 0.020
+                    and best_cov <= 0.85
+                    and a_det >= 0.010
                     and a_det <= 0.035
-                    and area_ratio >= 0.35
+                    and area_ratio >= 0.2
                     and area_ratio <= 0.60
                     and score_eff >= 0.26
                 ):
