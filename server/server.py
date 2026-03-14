@@ -538,8 +538,8 @@ class SsdDetector:
 
                 if (
                     sig_ok is False
-                    and area_ratio >= 2.0
-                    and a_det >= 0.50
+                    and area_ratio >= 1.6
+                    and a_det >= 0.45
                     and score_eff <= 0.30
                 ):
                     dbg["reason"] = "reject_topzone_bigbox_fp"
