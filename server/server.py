@@ -522,7 +522,7 @@ class SsdDetector:
                     and area_ratio >= 0.75
                     and area_ratio <= 1.00
                     and a_det <= 0.06
-                    and score_eff <= 0.32
+                    and score_eff <= 0.56
                 ):
                     dbg["reason"] = "reject_feeder_mid_fp"
                     return True, dbg
@@ -546,7 +546,7 @@ class SsdDetector:
                     return True, dbg
             # etető-magasságú, de túl széles feeder FP
             if best_match is not None and best_match["idx"] == 3:
-                score_eff = float(cand.get("score", 0.0))
+                score_eff = float(cand.ge.t("score", 0.0))
                 w_ratio = None
                 h_ratio = None
 
