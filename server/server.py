@@ -587,6 +587,20 @@ class SsdDetector:
                 dbg["reason"] = "reject_feeder_body_fp"
                 return True, dbg
             
+            # feeder small-box FP: kupak / felső etetőrész kis, de túl erős halu
+            if best_match is not None and best_match["idx"] == 3:
+                score_eff = float(cand.get("score", 0.0))
+
+                if (
+                    best_cov >= 0.60
+                    and a_det >= 0.020
+                    and a_det <= 0.035
+                    and area_ratio >= 0.35
+                    and area_ratio <= 0.60
+                    and score_eff >= 0.45
+                ):
+                    dbg["reason"] = "reject_feeder_small_hot_fp"
+                    return True, dbg
             # SMALL DETECT (bird inside feeder zone)
             if area_ratio <= self.exclude_area_ratio_small:
                 c_eff = int(cand.get("class", -1))
