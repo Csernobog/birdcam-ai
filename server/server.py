@@ -522,7 +522,7 @@ class SsdDetector:
                     and area_ratio >= 0.75
                     and area_ratio <= 1.00
                     and a_det <= 0.06
-                    and score_eff <= 0.32
+                    and score_eff <= 0.56
                 ):
                     dbg["reason"] = "reject_feeder_mid_fp"
                     return True, dbg
