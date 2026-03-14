@@ -592,12 +592,12 @@ class SsdDetector:
                 score_eff = float(cand.get("score", 0.0))
 
                 if (
-                    best_cov >= 0.60
+                    best_cov >= 0.57
                     and a_det >= 0.020
                     and a_det <= 0.035
                     and area_ratio >= 0.35
                     and area_ratio <= 0.60
-                    and score_eff >= 0.45
+                    and score_eff >= 0.36
                 ):
                     dbg["reason"] = "reject_feeder_small_hot_fp"
                     return True, dbg
